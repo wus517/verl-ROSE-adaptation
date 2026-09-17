@@ -255,6 +255,10 @@ def compute_advantage(
         }
         if "uid" in data.non_tensor_batch:  # optional
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
+        for field in config.get("advantage_extra_fields", []) if config is not None else []:
+            if field not in data.non_tensor_batch:
+                raise KeyError(f"advantage extra field {field!r} is missing from non_tensor_batch")
+            adv_kwargs[field] = data.non_tensor_batch[field]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
         # GDPO: pass raw data for per-dimension reward extraction

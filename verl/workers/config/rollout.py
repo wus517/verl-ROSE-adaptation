@@ -27,6 +27,7 @@ __all__ = [
     "MultiTurnConfig",
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
+    "RoseRolloutConfig",
     "TraceConfig",
     "ServerConfig",
     "PrometheusConfig",
@@ -77,6 +78,36 @@ class AgentLoopConfig(BaseConfig):
     # Fully qualified class name for custom AgentLoopManager (e.g., "mypackage.module.MyManager").
     # Security: This class will be dynamically imported via importlib. Only use trusted class paths.
     agent_loop_manager_class: Optional[str] = None
+
+
+@dataclass
+class RoseRolloutConfig(BaseConfig):
+    enable: bool = False
+    num_trajectories: Optional[int] = None
+    epsilon: float = 0.5
+    top_k: int = 20
+    embedding_path: Optional[str] = None
+    embedding_meta_path: Optional[str] = None
+    semantic_device: str = "cpu"
+    semantic_chunk_size: int = 256
+    exclude_semantic_diagonal: bool = True
+    validation_mode: str = "independent"
+
+    def __post_init__(self) -> None:
+        if self.num_trajectories is not None and self.num_trajectories < 1:
+            raise ValueError(f"ROSE num_trajectories must be positive, got {self.num_trajectories}")
+        if not 0.0 <= self.epsilon <= 1.0:
+            raise ValueError(f"ROSE epsilon must be in [0, 1], got {self.epsilon}")
+        if self.top_k < 2:
+            raise ValueError(f"ROSE top_k must be at least 2, got {self.top_k}")
+        if self.semantic_device != "cpu":
+            raise ValueError(f"ROSE currently supports semantic_device='cpu', got {self.semantic_device!r}")
+        if self.semantic_chunk_size < 1:
+            raise ValueError(f"ROSE semantic_chunk_size must be positive, got {self.semantic_chunk_size}")
+        if self.validation_mode != "independent":
+            raise ValueError(f"ROSE currently supports validation_mode='independent', got {self.validation_mode!r}")
+        if self.enable and not self.embedding_path:
+            raise ValueError("ROSE embedding_path is required when rollout.rose.enable=true")
 
 
 @dataclass
@@ -219,6 +250,8 @@ class RolloutConfig(BaseConfig):
     calculate_log_probs: bool = False
 
     agent: AgentLoopConfig = field(default_factory=AgentLoopConfig)
+
+    rose: RoseRolloutConfig = field(default_factory=RoseRolloutConfig)
 
     trace: TraceConfig = field(default_factory=TraceConfig)
 

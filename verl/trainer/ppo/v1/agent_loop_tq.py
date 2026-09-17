@@ -49,8 +49,7 @@ async def _settle_session_tasks(tasks: list[asyncio.Task[Any]]) -> list[BaseExce
     return [result for result in results if isinstance(result, BaseException)]
 
 
-@ray.remote
-class AgentLoopWorkerTQ(AgentLoopWorker):
+class AgentLoopWorkerTQBase(AgentLoopWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         tq.init()
@@ -227,9 +226,13 @@ class AgentLoopWorkerTQ(AgentLoopWorker):
         )
 
 
+AgentLoopWorkerTQ = ray.remote(AgentLoopWorkerTQBase)
+
+
 class AgentLoopManagerTQ(AgentLoopManager):
     def __init__(self, *args, **kwargs):
-        self.agent_loop_workers_class = AgentLoopWorkerTQ
+        if not hasattr(self, "agent_loop_workers_class"):
+            self.agent_loop_workers_class = AgentLoopWorkerTQ
         super().__init__(*args, **kwargs)
 
     @classmethod

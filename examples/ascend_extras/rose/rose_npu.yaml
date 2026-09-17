@@ -1,0 +1,54 @@
+# Canonical ROSE overrides for Ascend NPU. The runnable shell script applies
+# these values on top of verl/trainer/config/ppo_trainer.yaml.
+actor_rollout_ref:
+  rollout:
+    name: vllm
+    n: 8
+    calculate_log_probs: true
+    enable_prefix_caching: true
+    agent:
+      default_agent_loop: single_turn_agent
+      agent_loop_manager_class: verl.experimental.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ
+    rose:
+      enable: true
+      num_trajectories: 8
+      epsilon: 0.5
+      top_k: 20
+      embedding_path: ???
+      embedding_meta_path: null
+      semantic_device: cpu
+      semantic_chunk_size: 256
+      exclude_semantic_diagonal: true
+      validation_mode: independent
+  actor:
+    policy_loss:
+      loss_mode: vanilla
+    clip_ratio: 0.2
+    loss_agg_mode: seq-mean-token-sum-norm
+    loss_scale_factor: 4096
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    ppo_epochs: 1
+    shuffle: false
+
+algorithm:
+  adv_estimator: rose_tree
+  norm_adv_by_std_in_grpo: false
+  use_kl_in_reward: false
+  advantage_extra_fields:
+    - rose_tree_metadata
+  rose:
+    length_calibration_alpha: 1.0
+    require_binary_reward: true
+    binary_reward_tolerance: 1.0e-6
+  filter_groups:
+    enable: true
+    metric: reward
+    max_inflight_gen_batches: 1
+
+trainer:
+  device: npu
+  use_v1: true
+  v1:
+    sampler:
+      sync_refill_failed_groups: true

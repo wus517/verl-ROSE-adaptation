@@ -2,9 +2,9 @@
 
 > 论文：**Reinforced Efficient Reasoning via Semantically Diverse Exploration**  
 > 本地论文：[paper/ROSE.pdf](paper/ROSE.pdf)  
-> VeRL 基线：`main@00cd5b44`  
+> VeRL 基线：`ROSE-adaptation@f7d6513d`
 > 目标平台：华为 Ascend NPU，优先采用 `vLLM + vllm-ascend` rollout 以及 FSDP2 或 Megatron 训练后端  
-> 文档性质：实施设计，不代表当前仓库已经完成这些代码改造
+> 文档性质：算法说明、代码落点、配置方法、NPU 部署与验收手册；第 1.1 节记录当前分支实现状态
 
 ## 1. 目标与结论
 
@@ -46,12 +46,31 @@ Ascend NPU 上执行 PPO + KL 更新
 核心结论如下：
 
 - ROSE 的树采样必须放在自定义 V1 AgentLoop manager 中，不能只改 `adv_estimator`。
-- 当前 async vLLM server 会把整数 `logprobs=20` 错误转换成 `logprobs=0`，必须修复。
+- 原 async vLLM server 会把整数 `logprobs=20` 错误转换成 `0`；当前分支已修复并增加 top-K 压缩通路。
 - semantic entropy 首版建议在 **NPU 服务器本机的 host CPU** 上批量计算，而不是侵入 vllm-ascend worker。
 - tree advantage 和 length calibration 放在 trainer/controller CPU 上计算即可。
 - actor、reference、rollout、old/ref logprob、PPO forward/backward 仍然运行在 NPU 上。
 - FSDP2、Megatron、rollout TP 的选择只影响部署，不改变 ROSE 算法。
 - 第一版不要启用 fully async、off-policy 或 prefill/decode disaggregation；一棵树必须由同一个 policy version 完整生成。
+
+### 1.1 当前分支实现状态
+
+本文既说明“应该怎样适配”，也对应当前 `ROSE-adaptation` 分支的实际代码。阅读时请区分三种状态：
+
+| 模块 | 当前状态 | 代码位置 | 上 NPU 前还要做什么 |
+|---|---|---|---|
+| top-K logprob 请求与压缩 | 已实现 | `verl/workers/rollout/logprobs.py`、`vllm_async_server.py` | 在目标 vLLM-Ascend 版本验证返回格式和 TP 一致性 |
+| CPU semantic entropy | 已实现并通过 CPU 单测 | `verl/experimental/rose/semantic_entropy.py` | 在服务器 profile mmap/NUMA 开销 |
+| embedding 离线导出 | 已实现首版 | `verl/experimental/rose/prepare_embeddings.py` | 用目标 checkpoint 实际导出并校验 tokenizer/vocab |
+| 树构建与 finalization | 已实现并通过 CPU 单测 | `verl/experimental/rose/tree.py` | 在真实 rollout 检查导出的树 |
+| 树形 V1 AgentLoop/TQ | 已实现，fake server/TQ 回归通过 | `verl/experimental/rose/rose_agent_loop.py`、`rose_agent_loop_tq.py` | 在真实 vLLM-Ascend 上跑 smoke test |
+| tree advantage 与长度校准 | 已实现并通过数值单测 | `verl/experimental/rose/tree_advantage.py` | 在 Ascend 上执行一步 actor update |
+| metadata 进入 estimator | 已实现并通过 dispatch/回归测试 | `verl/trainer/ppo/ray_trainer.py`、`v1/trainer_base.py` | 在真实 Ray rollout 验证端到端序列化 |
+| 配置 schema | 已实现并通过生成器/Hydra 组合检查 | `verl/workers/config/rollout.py`、`verl/trainer/config/algorithm.py` 及 YAML | 在目标启动脚本中验证集群参数 |
+| Ascend 端到端训练 | 未验证 | 本文第 14～16 节 | 单卡/单机 smoke test，再扩到生产 TP/多机 |
+| NPU semantic scorer | 未实现，非首版必需 | 设计见第 7.6 节 | 仅当 CPU scoring 明显成为瓶颈时实现 |
+
+因此，当前代码可以作为适配实现的主体，但不能在没有目标 Ascend 环境 smoke test 的情况下宣称已经完成生产验证。CPU scorer 指的是 **NPU 服务器的 host CPU**，不是开发者笔记本；它只负责 top-K embedding 的轻量控制面计算，模型生成、logprob、PPO 前后向仍在 NPU 上。
 
 ## 2. ROSE 算法拆解
 
@@ -201,7 +220,7 @@ VeRL 已有 PPO loss、old logprob、reference logprob 和 KL loss，无需重�
 当前默认使用 V1 trainer。`verl/trainer/main_ppo.py` 支持通过配置加载自定义 manager：
 
 ```yaml
-actor_rollout_ref.rollout.agent.agent_loop_manager_class: recipe.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ
+actor_rollout_ref.rollout.agent.agent_loop_manager_class: verl.experimental.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ
 ```
 
 对应入口：
@@ -224,9 +243,9 @@ actor_rollout_ref.rollout.agent.agent_loop_manager_class: recipe.rose.rose_agent
 - **prompt 之间并行**；
 - **同一个 prompt 的树内生成按 trajectory 顺序执行**。
 
-### 3.3 当前 async vLLM server 只支持 sampled-token logprob
+### 3.3 原 async vLLM server 只支持 sampled-token logprob
 
-`verl/workers/rollout/vllm_rollout/vllm_async_server.py:620` 当前逻辑：
+适配前 `verl/workers/rollout/vllm_rollout/vllm_async_server.py` 的逻辑等价于：
 
 ```python
 sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
@@ -234,11 +253,11 @@ sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else N
 
 这会把整数 `20` 当成 truthy 值并转换为 `0`，导致无法获得 top-20。
 
-`verl/workers/rollout/vllm_rollout/vllm_async_server.py:713` 当前只提取 sampled token 的 logprob，没有把完整 top-K 暴露给 AgentLoop。
+当前分支已经通过 `verl/workers/rollout/logprobs.py` 保留整数请求，并把完整 top-K 压成固定形状数组后暴露给 AgentLoop；第 6 节描述的是该改造的接口约束。
 
 ### 3.4 Advantage 入口缺少 tree metadata
 
-V1 trainer 在 `verl/trainer/ppo/v1/trainer_base.py:1716` 读取固定字段：
+适配前 V1 trainer 只读取固定字段：
 
 ```text
 uid
@@ -250,11 +269,11 @@ ref_log_prob
 values
 ```
 
-ROSE estimator 还需要 tree metadata。建议把 trainer 改造成通用扩展：允许通过 `algorithm.advantage_extra_fields` 指定额外字段，而不是在 trainer 中硬编码 ROSE 字段。
+ROSE estimator 还需要 tree metadata。当前分支已经把 trainer 改造成通用扩展：通过 `algorithm.advantage_extra_fields` 指定额外字段，而不是在 trainer 中硬编码 ROSE 字段。
 
 ### 3.5 Advantage registry 可以复用
 
-`verl/trainer/ppo/core_algos.py:113` 已有 `ADV_ESTIMATOR_REGISTRY`。ROSE 可以在 recipe 中注册：
+`verl/trainer/ppo/core_algos.py` 已有 `ADV_ESTIMATOR_REGISTRY`。ROSE 在 experimental 模块中注册：
 
 ```python
 @register_adv_est("rose_tree")
@@ -266,36 +285,44 @@ def compute_rose_tree_advantage(...):
 
 ## 4. 推荐目录与文件改造
 
-建议新增：
+当前实现目录：
 
 ```text
-recipe/rose/
+verl/experimental/rose/
 ├── __init__.py
 ├── rose_agent_loop.py
 ├── rose_agent_loop_tq.py
 ├── semantic_entropy.py
+├── tree.py
 ├── tree_advantage.py
-├── prepare_embeddings.py
-├── config/
-│   └── rose_npu.yaml
-└── run_qwen3_rose_npu.sh
+└── prepare_embeddings.py
 ```
 
-建议修改：
+当前分支修改：
 
 | 文件 | 改动目的 |
 |---|---|
 | `verl/workers/rollout/vllm_rollout/vllm_async_server.py` | 支持整数 top-K logprobs，并返回紧凑 top-K 数据 |
 | `verl/trainer/ppo/v1/trainer_base.py` | 允许 estimator 读取配置指定的额外 metadata |
-| `verl/trainer/config/algorithm.py` | 可选：正式定义 `advantage_extra_fields` 配置字段 |
-| `verl/trainer/config/ppo_trainer.yaml` | 可选：增加空的默认 `advantage_extra_fields` |
-| `tests/...` | 增加 top-K、semantic entropy、tree advantage 和 V1 集成测试 |
+| `verl/trainer/config/algorithm.py` | 定义 `advantage_extra_fields` 和 ROSE algorithm 配置字段 |
+| `verl/trainer/config/ppo_trainer.yaml` | 增加空的默认 `advantage_extra_fields` 与 ROSE 默认值 |
+| `verl/trainer/ppo/v1/agent_loop_tq.py` | 提取可继承的 worker base，同时保留默认 remote worker API |
+| `tests/experimental/rose/` | 增加 top-K、semantic entropy、tree advantage、policy version、metadata 和 fake-server AgentLoop 测试 |
+
+Ascend 示例位于：
+
+```text
+examples/ascend_extras/rose/
+├── README.md
+├── rose_npu.yaml
+└── run_qwen3_4b_fsdp2.sh
+```
 
 不建议直接复制作者仓库中的旧版 `vllm_rollout_spmd.py`。作者实现基于旧同步 rollout，而当前 VeRL 主分支默认使用 V1 async AgentLoop 与 TransferQueue，直接搬运会绕过当前权重同步、调度和 replay buffer 逻辑。
 
 ## 5. 配置设计
 
-建议新增以下配置。新增 Hydra 字段在命令行中需要使用 `+` 或 `++`。
+当前分支已经把以下字段加入 dataclass 和默认 YAML，因此命令行直接覆盖即可，不需要 `+` 或 `++`：
 
 ```yaml
 actor_rollout_ref:
@@ -303,20 +330,17 @@ actor_rollout_ref:
     n: 8
     name: vllm
     agent:
-      agent_loop_manager_class: recipe.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ
+      agent_loop_manager_class: verl.experimental.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ
     rose:
       enable: true
       num_trajectories: 8
       epsilon: 0.5
       top_k: 20
-      branch_metric: semantic_entropy
-      generation_entropy_mode: strict_reference
       exclude_semantic_diagonal: true
-      embedding_path: /local_nvme/rose/input_embeddings.f16.npy
+      embedding_path: /local_nvme/rose/input_embeddings.f16
       embedding_meta_path: /local_nvme/rose/input_embeddings.json
       semantic_device: cpu
       semantic_chunk_size: 256
-      cache_node_entropy: true
       validation_mode: independent
 
 algorithm:
@@ -326,8 +350,7 @@ algorithm:
   rose:
     length_calibration_alpha: 1.0
     require_binary_reward: true
-    fail_on_invalid_tree: true
-    normalize_advantage: false
+    binary_reward_tolerance: 1.0e-6
 ```
 
 约束校验：
@@ -335,7 +358,7 @@ algorithm:
 - `num_trajectories == actor_rollout_ref.rollout.n`。
 - `0 <= epsilon <= 1`。
 - `top_k >= 2`。
-- `semantic_device ∈ {cpu, npu}`。
+- 当前实现要求 `semantic_device=cpu`；`npu` 是后续可选 scorer 方案，不是已经可用的配置值。
 - 训练时 `validation_mode=independent`，不要让验证指标依赖训练树策略。
 - 如果 `require_binary_reward=true`，reward 必须接近 `0/1`，否则 fail closed。
 
@@ -439,7 +462,15 @@ SamplingParams(
 
 ### 7.2 离线准备 embedding
 
-`prepare_embeddings.py` 建议执行：
+当前工具的执行方式：
+
+```bash
+python3 -m verl.experimental.rose.prepare_embeddings \
+    --model-path /models/Qwen3-4B-Base \
+    --output-path /local_nvme/rose/input_embeddings.f16
+```
+
+工具会：
 
 1. 从与 rollout 完全相同的 Hugging Face checkpoint 加载 input embedding。
 2. 读取 `model.get_input_embeddings().weight`。
@@ -457,8 +488,7 @@ metadata 示例：
   "hidden_size": 4096,
   "dtype": "float16",
   "normalized": true,
-  "tokenizer_hash": "...",
-  "embedding_hash": "..."
+  "embedding_sha256": "..."
 }
 ```
 
@@ -467,7 +497,7 @@ metadata 示例：
 - tokenizer vocabulary size 一致；
 - embedding 第一维覆盖所有有效 token ID；
 - hidden size 与模型配置一致；
-- hash 或模型路径匹配；
+- hash 或模型路径匹配；当前首版工具会写入摘要，但训练加载器仍需补启动时摘要复核；
 - 文件不是网络文件系统上的远程随机读热点。
 
 推荐把文件放到每台服务器的本地 NVMe 或 `/dev/shm`。不要让所有节点从同一个 NFS mmap 文件进行随机读取。
@@ -555,9 +585,10 @@ bytes ≈ generated_tokens × top_k × hidden_size × embedding_bytes
 需要记录：
 
 ```text
-rose/semantic_score_seconds
-rose/semantic_score_tokens_per_second
-rose/semantic_score_fraction_of_rollout
+timing/rose_semantic_score_mean
+timing/rose_semantic_score_max
+rose/semantic_tokens_per_second
+rose/semantic_score_fraction_of_generation
 ```
 
 决策建议：
@@ -849,7 +880,7 @@ AgentLoopOutput(
 
 ### 10.1 通用额外字段配置
 
-建议新增：
+当前分支已新增：
 
 ```yaml
 algorithm:
@@ -1010,11 +1041,10 @@ length = int(response_mask[row].sum())
 
 ### 11.6 是否做 advantage normalization
 
-论文使用 Dr.GRPO 风格，默认不按 group std 归一化。建议：
+论文使用 Dr.GRPO 风格，默认不按 group std 归一化。当前 `rose_tree` estimator 直接返回 segment advantage，不再额外执行 GRPO group normalization；配置中保留：
 
 ```yaml
 algorithm.norm_adv_by_std_in_grpo: false
-algorithm.rose.normalize_advantage: false
 ```
 
 不要复用 GRPO 的 group normalization，否则会改变 segment value difference 的尺度和长度校准效果。
@@ -1184,7 +1214,7 @@ actor_rollout_ref:
 
 ## 15. NPU 启动脚本示例
 
-以下是方向性模板；其中 `+...rose.*` 和 `algorithm.advantage_extra_fields` 需要前述代码/配置改造完成后才能使用。
+以下是基于当前配置 schema 的启动模板。它仍需要目标服务器上的 vLLM-Ascend、CANN、数据、模型和 reward function 配置；不要把它当成未经修改即可用于任意集群的生产脚本。
 
 ```bash
 #!/usr/bin/env bash
@@ -1203,7 +1233,7 @@ export HYDRA_FULL_ERROR=1
 MODEL_PATH=${MODEL_PATH:-/models/Qwen3-4B-Base}
 TRAIN_FILE=${TRAIN_FILE:-/data/math/train.parquet}
 VAL_FILE=${VAL_FILE:-/data/math/test.parquet}
-EMBEDDING_PATH=${EMBEDDING_PATH:-/dev/shm/qwen3_4b_embeddings.f16.npy}
+EMBEDDING_PATH=${EMBEDDING_PATH:-/dev/shm/qwen3_4b_embeddings.f16}
 
 python3 -m verl.trainer.main_ppo \
     trainer.device=npu \
@@ -1244,19 +1274,19 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.free_cache_engine=true \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
-    +actor_rollout_ref.rollout.agent.agent_loop_manager_class=recipe.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ \
-    +actor_rollout_ref.rollout.rose.enable=true \
-    +actor_rollout_ref.rollout.rose.num_trajectories=8 \
-    +actor_rollout_ref.rollout.rose.epsilon=0.5 \
-    +actor_rollout_ref.rollout.rose.top_k=20 \
-    +actor_rollout_ref.rollout.rose.semantic_device=cpu \
-    +actor_rollout_ref.rollout.rose.semantic_chunk_size=256 \
-    +actor_rollout_ref.rollout.rose.embedding_path="${EMBEDDING_PATH}" \
+    actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl.experimental.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ \
+    actor_rollout_ref.rollout.rose.enable=true \
+    actor_rollout_ref.rollout.rose.num_trajectories=8 \
+    actor_rollout_ref.rollout.rose.epsilon=0.5 \
+    actor_rollout_ref.rollout.rose.top_k=20 \
+    actor_rollout_ref.rollout.rose.semantic_device=cpu \
+    actor_rollout_ref.rollout.rose.semantic_chunk_size=256 \
+    actor_rollout_ref.rollout.rose.embedding_path="${EMBEDDING_PATH}" \
     algorithm.adv_estimator=rose_tree \
     algorithm.use_kl_in_reward=false \
     algorithm.norm_adv_by_std_in_grpo=false \
-    +algorithm.advantage_extra_fields='["rose_tree_metadata"]' \
-    +algorithm.rose.length_calibration_alpha=1.0 \
+    algorithm.advantage_extra_fields='["rose_tree_metadata"]' \
+    algorithm.rose.length_calibration_alpha=1.0 \
     algorithm.filter_groups.enable=true \
     algorithm.filter_groups.metric=reward \
     algorithm.filter_groups.max_inflight_gen_batches=1 \
@@ -1374,25 +1404,39 @@ Qwen3-0.6B, G=4, response=1024, 10 steps
 
 ## 17. 监控指标
 
-### 17.1 Rollout
+### 17.1 当前实现已经输出的指标
+
+```text
+rose/root_restart_ratio
+rose/branch_position_mean
+rose/prefix_reuse_tokens
+rose/new_generated_tokens
+rose/tree_depth_mean
+rose/tree_depth_max
+rose/topk_payload_bytes
+rose/semantic_entropy_max
+timing/rose_semantic_score_mean
+timing/rose_semantic_score_max
+rose/semantic_tokens_per_second
+rose/semantic_score_fraction_of_generation
+```
+
+这些指标在 V1 trainer 从每条有效 leaf 的 `extra_fields` 聚合；padding row 不参与统计。`semantic_score_fraction_of_generation` 用 semantic scorer 总耗时除以新 continuation 的 vLLM generation 总耗时，用于直接判断 host CPU 是否成为瓶颈。
+
+### 17.2 建议后续补充的 Rollout 指标
 
 ```text
 rose/tree_count
 rose/leaves_per_tree
-rose/root_restart_ratio
-rose/tree_max_depth
-rose/tree_mean_depth
-rose/branch_position_mean
 rose/branch_position_p50
 rose/branch_position_p95
 rose/semantic_entropy_mean
-rose/semantic_entropy_max
 rose/no_valid_pivot_count
-rose/prefix_reuse_tokens
-rose/new_generated_tokens
+timing/rose_tree_generation
+timing/rose_topk_pack
 ```
 
-### 17.2 Reward 和 filtering
+### 17.3 建议后续补充的 Reward 和 filtering 指标
 
 ```text
 rose/reward_mean
@@ -1403,7 +1447,7 @@ rose/filtered_group_count
 rose/refilled_group_count
 ```
 
-### 17.3 Advantage
+### 17.4 建议后续补充的 Advantage 指标
 
 ```text
 rose/node_value_mean
@@ -1415,19 +1459,14 @@ rose/correct_response_length_mean
 rose/shortest_correct_length_mean
 ```
 
-### 17.4 性能
+### 17.5 建议后续补充的阶段耗时
 
 ```text
-timing/rose_tree_generation
-timing/rose_topk_pack
-timing/rose_semantic_score
 timing/rose_reward
 timing/rose_advantage
-rose/semantic_tokens_per_second
-rose/topk_payload_bytes
 ```
 
-必须把 semantic score 时间和 vLLM generation 时间分开，否则无法判断 CPU 是否成为瓶颈。
+“建议后续补充”表示本文建议但当前分支尚未输出，不能在监控面板中假定这些 key 已经存在。必须把 semantic score 时间和 vLLM generation 时间分开，否则无法判断 CPU 是否成为瓶颈。
 
 ## 18. 与作者公开实现相比的有意改进
 

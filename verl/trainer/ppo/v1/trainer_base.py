@@ -19,6 +19,7 @@ import os
 import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pprint import pprint
@@ -101,6 +102,68 @@ def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+
+
+def _extract_advantage_extra_fields(
+    output_extra_fields: Sequence[Any],
+    field_names: Sequence[str],
+) -> dict[str, np.ndarray]:
+    rows = output_extra_fields.tolist() if hasattr(output_extra_fields, "tolist") else list(output_extra_fields)
+    extracted: dict[str, np.ndarray] = {}
+    for field_name in field_names:
+        missing_rows = [
+            row for row, extra in enumerate(rows) if not isinstance(extra, Mapping) or field_name not in extra
+        ]
+        if missing_rows:
+            raise KeyError(f"advantage extra field {field_name!r} is missing from rows {missing_rows[:5]}")
+        values = np.empty(len(rows), dtype=object)
+        values[:] = [extra[field_name] for extra in rows]
+        extracted[field_name] = values
+    return extracted
+
+
+def _compute_rose_rollout_metrics(
+    output_extra_fields: Sequence[Any],
+    non_padding_mask: np.ndarray,
+) -> dict[str, float]:
+    rows = output_extra_fields.tolist() if hasattr(output_extra_fields, "tolist") else list(output_extra_fields)
+    selected_rows = [
+        row
+        for row, keep in zip(rows, non_padding_mask, strict=True)
+        if keep and isinstance(row, Mapping) and isinstance(row.get("rose_tree_metadata"), Mapping)
+    ]
+    if not selected_rows:
+        return {}
+
+    def values(field_name: str) -> list[float]:
+        return [float(row[field_name]) for row in selected_rows if row.get(field_name) is not None]
+
+    semantic_seconds = values("rose_semantic_score_seconds")
+    generation_seconds = values("rose_generation_seconds")
+    new_tokens = values("rose_new_generated_tokens")
+    tree_depths = [len(row["rose_tree_metadata"]["path_node_ids"]) - 1 for row in selected_rows]
+    metrics = {
+        "rose/root_restart_ratio": float(np.mean(values("rose_root_restart"))),
+        "rose/branch_position_mean": float(np.mean(values("rose_branch_pos"))),
+        "rose/prefix_reuse_tokens": float(np.mean(values("rose_prefix_reuse_tokens"))),
+        "rose/new_generated_tokens": float(np.mean(new_tokens)),
+        "rose/tree_depth_mean": float(np.mean(tree_depths)),
+        "rose/tree_depth_max": float(np.max(tree_depths)),
+        "rose/topk_payload_bytes": float(np.mean(values("rose_topk_payload_bytes"))),
+    }
+    entropy_maxima = values("rose_semantic_entropy_max")
+    if entropy_maxima:
+        metrics["rose/semantic_entropy_max"] = float(np.max(entropy_maxima))
+    if semantic_seconds:
+        metrics["timing/rose_semantic_score_mean"] = float(np.mean(semantic_seconds))
+        metrics["timing/rose_semantic_score_max"] = float(np.max(semantic_seconds))
+        total_semantic_seconds = float(np.sum(semantic_seconds))
+        if total_semantic_seconds > 0 and new_tokens:
+            metrics["rose/semantic_tokens_per_second"] = float(np.sum(new_tokens) / total_semantic_seconds)
+        total_generation_seconds = float(np.sum(generation_seconds))
+        if total_generation_seconds > 0:
+            metrics["rose/semantic_score_fraction_of_generation"] = total_semantic_seconds / total_generation_seconds
+    return metrics
 
 
 def _tq_supports_checkpoint() -> bool:
@@ -1716,12 +1779,22 @@ class PPOTrainer(ABC):
     def _compute_advantage(self, batch: KVBatchMeta, metrics: dict) -> KVBatchMeta:
         """Compute the advantage of the batch."""
         fields = ["uid", "response_mask", "rm_scores", "rollout_log_probs", "old_log_probs", "ref_log_prob", "values"]
+        advantage_extra_fields = list(self.config.algorithm.get("advantage_extra_fields", []))
+        if advantage_extra_fields:
+            fields.append("extra_fields")
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
 
         response_mask = data["response_mask"]
+        extracted_extra_fields = {}
+        if advantage_extra_fields:
+            extracted_extra_fields = _extract_advantage_extra_fields(
+                data.pop("extra_fields"),
+                advantage_extra_fields,
+            )
         data = DataProto(batch=data.to_padded_tensor())
         data.batch["token_level_scores"] = data.batch["rm_scores"]
         data.non_tensor_batch["uid"] = np.array(data.batch.pop("uid").tolist(), dtype=object)
+        data.non_tensor_batch.update(extracted_extra_fields)
 
         # 1. apply kl penalty to rewards
         if self.config.algorithm.use_kl_in_reward:
@@ -1870,24 +1943,35 @@ class PPOTrainer(ABC):
         min_global_steps = np.array([tag["min_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
         max_global_steps = np.array([tag["max_global_steps"] for tag in batch.tags], dtype=int)[non_padding_mask]
 
-        # Only fetch speculative decoding stats when rollout writes them.
+        # Fetch optional rollout metadata once when speculative decoding or ROSE needs it.
         spec_drafts = spec_accepts = spec_verifies = None
         mtp_config = getattr(self.config.actor_rollout_ref.model, "mtp", None)
-        if mtp_config is not None and mtp_config.enable and mtp_config.enable_rollout:
+        mtp_metrics_enabled = mtp_config is not None and mtp_config.enable and mtp_config.enable_rollout
+        rollout_config = self.config.actor_rollout_ref.rollout
+        rose_config = (
+            rollout_config.get("rose", None)
+            if hasattr(rollout_config, "get")
+            else getattr(rollout_config, "rose", None)
+        )
+        rose_metrics_enabled = bool(rose_config and rose_config.get("enable", False))
+        output_extra_fields = None
+        if mtp_metrics_enabled or rose_metrics_enabled:
             spec_data = tq.kv_batch_get(
                 keys=batch.keys,
                 partition_id=batch.partition_id,
                 select_fields=["extra_fields"],
             )
-            extra_fields = spec_data.pop("extra_fields").tolist()
+            output_extra_fields = spec_data.pop("extra_fields").tolist()
+        if mtp_metrics_enabled:
             # The rollout omits the spec_* stats when the backend does not report
             # per-request spec-decode stats; leave all three as None in that case.
-            if extra_fields and all(
-                isinstance(extra_field, dict) and "spec_num_draft_tokens" in extra_field for extra_field in extra_fields
+            if output_extra_fields and all(
+                isinstance(extra_field, dict) and "spec_num_draft_tokens" in extra_field
+                for extra_field in output_extra_fields
             ):
-                spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in extra_fields]
-                spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in extra_fields]
-                spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in extra_fields]
+                spec_drafts = [extra_field["spec_num_draft_tokens"] for extra_field in output_extra_fields]
+                spec_accepts = [extra_field["spec_num_accepted_tokens"] for extra_field in output_extra_fields]
+                spec_verifies = [extra_field["spec_num_verify_steps"] for extra_field in output_extra_fields]
 
         data = data.to_padded_tensor()
         data["token_level_scores"] = data["rm_scores"]
@@ -1929,6 +2013,8 @@ class PPOTrainer(ABC):
         # 4. per-request speculative-decoding aggregation (same metrics async PPO logs;
         # see compute_spec_decode_metrics in verl/trainer/ppo/ray_trainer.py).
         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
+        if rose_metrics_enabled:
+            metrics.update(_compute_rose_rollout_metrics(output_extra_fields, non_padding_mask))
 
         # 5. off-policy staleness metrics
         #   global_steps is the model weight version (one update_weights per global_step), and

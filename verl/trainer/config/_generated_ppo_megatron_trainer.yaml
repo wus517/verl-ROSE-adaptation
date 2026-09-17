@@ -376,10 +376,23 @@ actor_rollout_ref:
       num_workers: 8
       default_agent_loop: single_turn_agent
       agent_loop_config_path: null
+      agent_loop_manager_class: null
       custom_async_server:
         _target_: verl.workers.config.CustomAsyncServerConfig
         path: null
         name: null
+    rose:
+      _target_: verl.workers.config.RoseRolloutConfig
+      enable: false
+      num_trajectories: null
+      epsilon: 0.5
+      top_k: 20
+      embedding_path: null
+      embedding_meta_path: null
+      semantic_device: cpu
+      semantic_chunk_size: 256
+      exclude_semantic_diagonal: true
+      validation_mode: independent
     checkpoint_engine:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive
@@ -896,6 +909,12 @@ algorithm:
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: true
+  advantage_extra_fields: []
+  rose:
+    _target_: verl.trainer.config.RoseAlgorithmConfig
+    length_calibration_alpha: 1.0
+    require_binary_reward: true
+    binary_reward_tolerance: 1.0e-06
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: false

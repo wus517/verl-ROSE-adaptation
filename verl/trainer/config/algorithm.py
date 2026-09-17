@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from verl.base_config import BaseConfig
 
-__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig"]
+__all__ = ["AlgoConfig", "FilterGroupsConfig", "KLControlConfig", "RolloutCorrectionConfig", "RoseAlgorithmConfig"]
 
 
 @dataclass
@@ -58,6 +58,19 @@ class FilterGroupsConfig(BaseConfig):
     metric: Optional[str] = None
     max_num_gen_batches: int = 0
     max_inflight_gen_batches: int = 1
+
+
+@dataclass
+class RoseAlgorithmConfig(BaseConfig):
+    length_calibration_alpha: float = 1.0
+    require_binary_reward: bool = True
+    binary_reward_tolerance: float = 1e-6
+
+    def __post_init__(self) -> None:
+        if self.length_calibration_alpha < 0:
+            raise ValueError(f"ROSE length_calibration_alpha must be non-negative, got {self.length_calibration_alpha}")
+        if self.binary_reward_tolerance < 0:
+            raise ValueError(f"ROSE binary_reward_tolerance must be non-negative, got {self.binary_reward_tolerance}")
 
 
 @dataclass
@@ -662,6 +675,8 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
+    advantage_extra_fields: list[str] = field(default_factory=list)
+    rose: RoseAlgorithmConfig = field(default_factory=RoseAlgorithmConfig)
     # Rollout Correction: corrects off-policy issues (policy mismatch, model staleness, distribution shifts)
     # Set to None to disable, use RolloutCorrectionConfig presets (e.g., .tis(), .mis()), or pass dict
     rollout_correction: Optional[RolloutCorrectionConfig] = None

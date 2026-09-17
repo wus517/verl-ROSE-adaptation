@@ -76,6 +76,19 @@ algorithm:
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
+  # Keys read from AgentLoopOutput.extra_fields and forwarded to custom advantage estimators.
+  advantage_extra_fields: []
+
+  # ROSE tree-advantage configuration.
+  rose:
+
+    # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+    _target_: verl.trainer.config.RoseAlgorithmConfig
+
+    length_calibration_alpha: 1.0
+    require_binary_reward: true
+    binary_reward_tolerance: 1.0e-6
+
   # Group filtering configuration used by DAPO and entropy-based sampling
   filter_groups:
 

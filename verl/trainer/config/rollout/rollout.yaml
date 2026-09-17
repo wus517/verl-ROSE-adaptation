@@ -260,6 +260,9 @@ agent:
   #   max_terms: 6
   agent_loop_config_path: null
 
+  # Fully qualified custom AgentLoopManager class.
+  agent_loop_manager_class: null
+
   # custom async server configs
   custom_async_server:
 
@@ -271,6 +274,36 @@ agent:
 
     # Class name of the custom async server class (e.g. AsyncvLLMServer)
     name: null
+
+# ROSE semantic tree-rollout configuration. It is inactive unless enable=True
+# and a ROSE AgentLoopManager is selected.
+rose:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.RoseRolloutConfig
+
+  enable: false
+
+  # null inherits actor_rollout_ref.rollout.n
+  num_trajectories: null
+
+  # Probability of restarting generation from the root instead of branching.
+  epsilon: 0.5
+
+  # Number of token candidates used for semantic entropy.
+  top_k: 20
+
+  # Row-normalized FP16 input embedding table and its JSON metadata.
+  embedding_path: null
+  embedding_meta_path: null
+
+  # The initial implementation supports host CPU scoring.
+  semantic_device: cpu
+  semantic_chunk_size: 256
+  exclude_semantic_diagonal: true
+
+  # Validation keeps the standard independent rollout distribution.
+  validation_mode: independent
 
 # Checkpoint Engine config for update weights from trainer to rollout
 checkpoint_engine:
