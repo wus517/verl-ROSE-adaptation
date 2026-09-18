@@ -162,6 +162,7 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
             agent_loop = self._make_agent_loop()
             prompt_ids = await agent_loop.build_prompt(prompt["raw_prompt"])
             global_steps = int(prompt.get("global_steps", trajectory["step"]))
+            expected_policy_version = global_steps - 1
             rng = random.Random(_seed_for_prompt(self.rollout_config.seed, uid, global_steps))
             trajectories: list[_Trajectory] = []
 
@@ -217,7 +218,7 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
                     )
                 )
 
-            _validate_policy_versions(trajectories, global_steps)
+            _validate_policy_versions(trajectories, expected_policy_version)
 
             tree_metadata = finalize_tree(
                 uid,

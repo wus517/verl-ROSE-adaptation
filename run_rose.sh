@@ -23,7 +23,7 @@ export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
 # Keep the dataset/reward assignments in the command below unchanged when
 # using the xyi dataset/reward.
 BASE_PATH='/home/ma-user/work'
-MODEL_PATH='/home/ma-user/work/model/qwen3-0.6B/main'
+MODEL_PATH='/home/ma-user/work/model/Qwen3-0.6B/main'
 # --------------------------------------------------------------------------
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -84,6 +84,8 @@ PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
 PPO_MICRO_BATCH_SIZE=${PPO_MICRO_BATCH_SIZE:-1}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
+MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
+MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-8192}
 ROLLOUT_N=${ROLLOUT_N:-8}
 ROSE_EPSILON=${ROSE_EPSILON:-0.5}
 ROSE_ALPHA=${ROSE_ALPHA:-1.0}
@@ -136,9 +138,9 @@ fi
     trainer.use_v1=true \
     algorithm.adv_estimator=rose_tree \
     data.train_files="$BASE_PATH/dataset/xyi/train.json" \
-    data.val_files="$BASE_PATH/dataset/xyi/val_high_pass.json","$BASE_PATH/dataset/xyi/val_low_pass.json" \
+    data.val_files="[$BASE_PATH/dataset/xyi/val_high_pass.json,$BASE_PATH/dataset/xyi/val_low_pass.json]" \
     data.prompt_key=prompt \
-    data.reward_key=data_source \
+    data.reward_fn_key=data_source \
     data.return_raw_chat=true \
     reward.custom_reward_function.path="$BASE_PATH/rewards/xyi/reward_math_verifier.py" \
     reward.custom_reward_function.name=compute_score \
@@ -163,10 +165,13 @@ fi
     actor_rollout_ref.actor.fsdp_config.param_offload=false \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="$PPO_MICRO_BATCH_SIZE" \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="$PPO_MICRO_BATCH_SIZE" \
     actor_rollout_ref.rollout.enable_chunked_prefill=false \
     actor_rollout_ref.rollout.tensor_model_parallel_size="$ROLLOUT_TP" \
     actor_rollout_ref.rollout.agent.num_workers=2 \
     actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.max_model_len="$MAX_MODEL_LEN" \
+    actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS" \
     actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.32 \
     actor_rollout_ref.rollout.n="$ROLLOUT_N" \
