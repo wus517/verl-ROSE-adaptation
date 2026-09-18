@@ -213,3 +213,17 @@ python3 -m verl.experimental.rose.prepare_embeddings \
 - 当前 TransferQueue/replay buffer 回归测试已通过；仍需在真实 Ray + vLLM-Ascend rollout 中验证 `extra_fields.rose_tree_metadata` 的端到端序列化。
 - NPU 环境下目标模型与生产 TP 的 top-20 smoke test。
 - 根据 Ascend profiling 决定是否实现独立 NPU semantic scorer；首版没有实现该可选路径。
+
+## D018：根目录单入口脚本自动准备运行环境
+
+**状态：已决定并实施**
+
+用户的现有 `run_cure.bash` 位于仓库根目录，并把数据集与 reward 路径直接写入 Hydra 命令。为降低 ROSE 启动时的人为遗漏，新增根目录 `run_rose.bash`：
+
+- 保持 `BASE_PATH`、`MODEL_PATH`、`data.train_files`、`data.val_files` 和 `reward.custom_reward_function` 的既有 xyi 路径不变；
+- 在启动前检查数据、reward 和本地模型配置；
+- 自动调用 `prepare_embeddings`，并用 metadata 中的 `model_path` 防止复用其他 checkpoint 的 embedding；
+- 自动检测可见 NPU 数量和推导 rollout TP；
+- 其余参数沿用 `run_cure.bash` 的训练规模，同时替换为 ROSE tree rollout 与 `rose_tree` estimator。
+
+这样用户只需编辑根脚本顶部的 `BASE_PATH` 和 `MODEL_PATH`，不需要手工准备 embedding 或复制长串 Hydra overrides。

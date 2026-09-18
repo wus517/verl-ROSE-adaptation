@@ -4,29 +4,20 @@ This example runs the first supported ROSE configuration: V1 synchronous
 training, single-turn text prompts, vLLM-Ascend rollout, binary rewards, and
 host-CPU semantic scoring.
 
-Prepare a row-normalized embedding table from the exact rollout checkpoint:
+The canonical entrypoint is now in the repository root. Edit `BASE_PATH` and
+`MODEL_PATH` at the top of `run_rose.bash`; it automatically validates the
+dataset/reward files, prepares the normalized embedding table, detects the
+visible NPU count, and starts V1 ROSE training:
 
 ```bash
-python3 -m verl.experimental.rose.prepare_embeddings \
-    --model-path /models/Qwen3-4B-Base \
-    --output-path /local_nvme/rose/qwen3_4b_embeddings.f16
+bash run_rose.bash
 ```
 
-Place the generated binary and JSON metadata on local NVMe or `/dev/shm` on
-every rollout node. Then run:
-
-```bash
-MODEL_PATH=/models/Qwen3-4B-Base \
-TRAIN_FILE=/data/math/train.parquet \
-VAL_FILE=/data/math/test.parquet \
-EMBEDDING_PATH=/local_nvme/rose/qwen3_4b_embeddings.f16 \
-bash examples/ascend_extras/rose/run_qwen3_4b_fsdp2.sh
-```
-
-`rose_npu.yaml` documents the canonical overrides but is not a standalone
-Hydra config. Start with `ROLLOUT_N=2` and a short response length for the
-first smoke test. Do not enable fully asynchronous training, multi-turn/tool
-rollout, multimodal inputs, or speculative decoding in the initial version.
+The older `examples/ascend_extras/rose/run_qwen3_4b_fsdp2.sh` remains as a
+fully explicit template. Start with `ROLLOUT_N=2` and a short response length
+for the first smoke test by changing the corresponding defaults in the root
+script. Do not enable fully asynchronous training, multi-turn/tool rollout,
+multimodal inputs, or speculative decoding in the initial version.
 
 The semantic scorer runs on the NPU server's host CPU. Model generation,
 sampled log-probability computation, reference evaluation, and PPO updates

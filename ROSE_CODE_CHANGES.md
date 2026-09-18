@@ -134,9 +134,18 @@
 
 ## Ascend 示例
 
+### `run_rose.bash`
+
+- 新增根目录 canonical 训练入口，使用方式与 `run_cure.bash` 一致。
+- 保留 `BASE_PATH`、`MODEL_PATH`、`data.train_files`、`data.val_files` 和 `reward.custom_reward_function` 的 xyi 路径不变。
+- 自动检查数据集、reward 文件和本地模型配置；自动选择项目 `.venv` Python。
+- 自动准备并复用与 `MODEL_PATH` 绑定的 normalized FP16 embedding mmap 和 JSON metadata。
+- 自动检测 `ASCEND_RT_VISIBLE_DEVICES`/`NPU_VISIBLE_DEVICES` 或 `npu-smi` 的 NPU 数量，并推导 rollout TP。
+- 自动注入 ROSE AgentLoop、top-K logprob、tree advantage、dynamic filtering 和 V1 sampler 配置。
+
 ### `examples/ascend_extras/rose/README.md`
 
-- 说明支持范围、embedding 准备、环境变量、启动方式和 CPU/NPU 边界。
+- 说明根目录脚本的自动准备流程、支持范围、启动方式和 CPU/NPU 边界。
 
 ### `examples/ascend_extras/rose/rose_npu.yaml`
 
@@ -208,6 +217,7 @@ env PATH="$PWD/.venv/bin:$PATH" \
 - Ruff lint：通过。
 - Ruff format check：通过。
 - `python3 -m compileall`：通过。
+- `bash -n run_rose.bash`：通过。
 - `bash -n examples/ascend_extras/rose/run_qwen3_4b_fsdp2.sh`：通过。
 - `git diff --check`：通过。
 - Hydra 使用实际 ROSE overrides 组合成功。

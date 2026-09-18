@@ -312,11 +312,16 @@ verl/experimental/rose/
 Ascend 示例位于：
 
 ```text
+run_rose.bash                         # 根目录 canonical 入口，自动准备 embedding
 examples/ascend_extras/rose/
 ├── README.md
 ├── rose_npu.yaml
 └── run_qwen3_4b_fsdp2.sh
 ```
+
+推荐直接运行根目录的 `run_rose.bash`。它保留 `run_cure.bash` 中的 xyi
+数据/reward 路径，只需修改顶部 `BASE_PATH` 和 `MODEL_PATH`，其余 ROSE
+参数、embedding 准备和 NPU 数量检测由脚本完成。
 
 不建议直接复制作者仓库中的旧版 `vllm_rollout_spmd.py`。作者实现基于旧同步 rollout，而当前 VeRL 主分支默认使用 V1 async AgentLoop 与 TransferQueue，直接搬运会绕过当前权重同步、调度和 replay buffer 逻辑。
 
@@ -1214,7 +1219,13 @@ actor_rollout_ref:
 
 ## 15. NPU 启动脚本示例
 
-以下是基于当前配置 schema 的启动模板。它仍需要目标服务器上的 vLLM-Ascend、CANN、数据、模型和 reward function 配置；不要把它当成未经修改即可用于任意集群的生产脚本。
+仓库根目录的 `run_rose.bash` 是推荐入口。它模仿根目录的 `run_cure.bash`，保留 xyi 数据和 reward 路径，并自动准备 embedding、检测 NPU 数量和注入 ROSE overrides。只需编辑脚本顶部的 `BASE_PATH` 和 `MODEL_PATH`：
+
+```bash
+bash run_rose.bash
+```
+
+下面保留一份等价的显式配置模板，便于审阅或迁移到其他启动系统；它仍需要目标服务器上的 vLLM-Ascend、CANN、数据、模型和 reward function 配置。
 
 ```bash
 #!/usr/bin/env bash
