@@ -127,6 +127,11 @@ ENV/
 
 # local logs
 logs
+log_part
 log
 outputs
 .history
+
+# .sh files
+verl_090_xyi_grpo.sh
+verl_090_xyi.sh
