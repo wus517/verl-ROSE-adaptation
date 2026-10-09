@@ -332,6 +332,7 @@ class AgentLoopBase(ABC):
         it is a builder-lifetime constant captured at construction and applied by
         the builder itself during rendering.
         """
+        print("messages:",messages,flush=True)
         prompt_ids = await self.loop.run_in_executor(
             None,
             lambda: self.continuous_token_builder.build_initial_tokens(
