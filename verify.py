@@ -1211,14 +1211,11 @@ def legacy_reward_input(solution_str: str) -> str:
     return "<think>\n" + solution_str
 
 
-def final_response(solution_str: str) -> str | None:
-    """Return the text after the last ``</think>``, or None if it is missing.
-
-    The verifier then takes the last ``\\boxed{}`` in this text as the answer.
-    """
-    if THINK_END not in solution_str:
-        return None
-    return solution_str.rsplit(THINK_END, 1)[1]
+def final_response(solution_str: str) -> str:
+    """有 </think> 时取其后内容，否则使用完整输出。"""
+    if THINK_END in solution_str:
+        return solution_str.rsplit(THINK_END, 1)[1]
+    return solution_str
 
 
 def ground_truth_answers(ground_truth) -> list[str]:
