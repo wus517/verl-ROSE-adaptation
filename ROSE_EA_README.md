@@ -55,6 +55,7 @@ EA_ENABLE=False EXP_NAME=rose_control bash run_rose_ea.sh
 | `ROSE_EA_README.md` | 当前状态、上下文恢复入口、待讨论事项 |
 | `ROSE_EA_IMPLEMENTATION_PLAN.md` | 实施主合同：接口、逐文件改动、阶段、测试与验收 |
 | `ROSE_EA_DESIGN.md` | 论文事实、组合公式、设计理由、改动范围、配置与实验设计 |
+| [ROSE_EA_ALGORITHM_COMPARISON.md](ROSE_EA_ALGORITHM_COMPARISON.md) | ROSE/EA 原算法、最终组合、工程等价优化与近似、实际脚本和论文配置差异 |
 | `ROSE_EA_WORKLOG.md` | 已执行工作、证据、逐文件实施进度、测试结果与风险 |
 
 已有 `ROSE_VERL_ASCEND_ADAPTATION.md`、`ROSE_VERL_TUTORIAL.md`、`ROSE_IMPLEMENTATION_DECISIONS.md`、`ROSE_CODE_CHANGES.md` 作为 ROSE 历史背景保留。本组文档不将历史配置自动视为本分支运行事实。

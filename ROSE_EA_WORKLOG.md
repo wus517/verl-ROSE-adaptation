@@ -145,3 +145,9 @@ UV_CACHE_DIR=/tmp/verl-rose-ea-uv-cache uv run --no-sync python -m pytest -q \
 ## 上下文恢复提醒
 
 当前工程适配与本地验证已完成，入口为 run_rose_ea.sh。后续从服务器 NPU smoke test 接续，不重复实施 P0-P5，也不把 CPU 验证当成服务器训练通过。不要混用 old-policy/current-policy entropy。先从 `ROSE_EA_README.md` 进入，并重新核查工作区。
+
+## 2026-11-12：新增算法对比文档
+
+- 按用户要求在分支根目录新增 `ROSE_EA_ALGORITHM_COMPARISON.md`，整理 ROSE/EA 论文算法、当前组合公式、工程实现与近似、运行脚本相对论文的配置差异。
+- 明确区分 ROSE top-K 语义评分与 EA 当前策略全词表熵，说明默认 alpha=0、同奖励组过滤关闭，以及失败补采不等于动态过滤。
+- README 增加入口；未改 Python、YAML、运行脚本或论文，没有重新运行算法测试、部署或训练。
