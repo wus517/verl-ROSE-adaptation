@@ -133,5 +133,7 @@ outputs
 .history
 
 # .sh files
-verl_090_xyi_grpo.sh
-verl_090_xyi.sh
+run_rose_new.sh
+
+# other files
+TreePO
