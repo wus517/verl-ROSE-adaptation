@@ -88,8 +88,10 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import DapoFilteredRewardTableLogger, Tracking, ValidationGenerationsLogger
 from verl.workers.config import CriticConfig, DistillationConfig, HFModelConfig
+from verl.workers.config.actor import get_entropy_advantage_config
 from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker, TrainingWorkerConfig
 from verl.workers.rollout.llm_server import LLMServerClient, LLMServerManager
+from verl.workers.utils.entropy_advantage import finalize_entropy_advantage_metrics, sum_entropy_advantage_metrics
 from verl.workers.utils.losses import value_loss
 from verl.workers.utils.padding import response_from_nested, response_to_nested
 
@@ -196,6 +198,17 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        ea = get_entropy_advantage_config(config.actor_rollout_ref.actor)
+        if ea.enable:
+            logger.info(
+                "[ROSE_EA] enable=%s active=%s coef=%s kappa=%s chunk=%s "
+                "current/full-vocab/detached actor-device entropy",
+                ea.enable,
+                ea.active,
+                ea.coef,
+                ea.kappa,
+                ea.entropy_chunk_size,
+            )
         self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
@@ -550,6 +563,7 @@ class PPOTrainer(ABC):
 
             # 5. record metrics
             self._compute_metrics(batch, metrics, self.timing_raw, global_steps=self.global_steps, epoch=current_epoch)
+            finalize_entropy_advantage_metrics(metrics)
 
             # 6. dump rollout generations if enabled
             rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
@@ -1901,11 +1915,18 @@ class PPOTrainer(ABC):
             "dataloader_kwargs": {"shuffle": self.config.actor_rollout_ref.actor.shuffle},
             "temperature": self.config.actor_rollout_ref.rollout.temperature,
         }
+        ea = get_entropy_advantage_config(self.config.actor_rollout_ref.actor)
+        if ea.active:
+            extra_info.update(
+                calculate_entropy_advantage=True,
+                entropy_advantage_chunk_size=ea.entropy_chunk_size,
+            )
         batch.extra_info.update(extra_info)
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")
         output["perf/mfu/actor"] = output.pop("actor/mfu")
+        metrics.update(sum_entropy_advantage_metrics(output))
         actor_metrics = reduce_metrics(output)
         metrics.update(actor_metrics)
 

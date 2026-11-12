@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -33,6 +34,7 @@ from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
 __all__ = [
+    "EntropyAdvantageConfig",
     "PolicyLossConfig",
     "RouterReplayConfig",
     "ActorConfig",
@@ -42,6 +44,42 @@ __all__ = [
     "QATConfig",
     "TorchTitanActorConfig",
 ]
+
+
+@dataclass
+class EntropyAdvantageConfig(BaseConfig):
+    """Detached, clipped current-policy entropy advantage (EA), independent of entropy regularization."""
+
+    enable: bool = False
+    coef: float = 0.1
+    kappa: float = 2.0
+    entropy_chunk_size: int = 64
+
+    def __post_init__(self):
+        if not isinstance(self.enable, bool):
+            raise ValueError("entropy_advantage.enable must be a bool")
+        for name, lower in (("coef", 0.0), ("kappa", 1.0)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+                raise ValueError(f"entropy_advantage.{name} must be a finite number")
+            if value < lower or (name == "kappa" and value == lower):
+                raise ValueError(f"entropy_advantage.{name} must be {'>' if name == 'kappa' else '>='} {lower}")
+        if type(self.entropy_chunk_size) is not int or self.entropy_chunk_size < 1:
+            raise ValueError("entropy_advantage.entropy_chunk_size must be a positive integer")
+
+    @property
+    def active(self) -> bool:
+        return self.enable and self.coef > 0
+
+
+def get_entropy_advantage_config(actor_config) -> EntropyAdvantageConfig:
+    """Accept both resolved dataclasses and DictConfig/dict callers without mutating them."""
+    config = actor_config.get("entropy_advantage", None)
+    if config is None:
+        return EntropyAdvantageConfig()
+    if isinstance(config, EntropyAdvantageConfig):
+        return config
+    return EntropyAdvantageConfig(**{key: value for key, value in config.items() if key != "_target_"})
 
 
 @dataclass
@@ -124,6 +162,7 @@ class ActorConfig(BaseConfig):
         loss_scale_factor (Optional[int]): Scale factor for 'seq-mean-token-sum-norm' loss aggregation mode.
             If None, uses response_length. Set to a constant to ensure consistent normalization.
         entropy_coeff (float): Entropy coefficient for regularization.
+        entropy_advantage (EntropyAdvantageConfig): Detached current-policy entropy shaping, disabled by default.
         tau_pos (float): Positive tau for SAPO smoothing (>= 1.0 keeps rewards stable).
         tau_neg (float): Negative tau for SAPO smoothing (> tau_pos for asymmetry).
         use_kl_loss (bool): Whether to use KL divergence loss.
@@ -164,6 +203,7 @@ class ActorConfig(BaseConfig):
     loss_agg_mode: str = "token-mean"
     loss_scale_factor: Optional[int] = None
     entropy_coeff: float = 0
+    entropy_advantage: EntropyAdvantageConfig = field(default_factory=EntropyAdvantageConfig)
     tau_pos: float = 1.0
     tau_neg: float = 1.05
     calculate_entropy: bool = False

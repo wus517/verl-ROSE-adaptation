@@ -72,6 +72,7 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 from verl.workers.config import FSDPEngineConfig, FSDPOptimizerConfig, HFModelConfig
+from verl.workers.utils.entropy_advantage import entropy_advantage_from_logits
 from verl.workers.utils.padding import build_attention_mask_from_nested
 
 from ..base import BaseEngine, BaseEngineCtx, EngineRegistry
@@ -1331,6 +1332,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
+        calculate_ea = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy_advantage", default=False)
+        ea_chunk_size = tu.get_non_tensor_data(data=micro_batch, key="entropy_advantage_chunk_size", default=64)
+        if calculate_ea and (use_fused_kernels or self.engine_config.ulysses_sequence_parallel_size != 1):
+            raise NotImplementedError("EA entropy requires non-fused FSDP logits and actor SP=1")
         calculate_sum_pi_squared = tu.get_non_tensor_data(
             data=micro_batch, key="calculate_sum_pi_squared", default=False
         )
@@ -1388,6 +1393,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
                 log_probs = None
 
+                if calculate_ea:
+                    ea_entropy_rmpad = entropy_advantage_from_logits(logits_rmpad, chunk_size=ea_chunk_size)
+
                 if calculate_sum_pi_squared:
                     sum_pi_squared_rmpad = verl_F.calculate_sum_pi_squared_from_logits(logits_rmpad)
 
@@ -1434,6 +1442,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 log_probs = self._gather_and_unpad_packed(log_probs, pad_size)
             if calculate_entropy:
                 entropy_rmpad = self._gather_and_unpad_packed(entropy_rmpad, pad_size)
+            if calculate_ea:
+                ea_entropy_rmpad = self._gather_and_unpad_packed(ea_entropy_rmpad, pad_size)
             if calculate_sum_pi_squared:
                 sum_pi_squared_rmpad = self._gather_and_unpad_packed(sum_pi_squared_rmpad, pad_size)
 
@@ -1444,6 +1454,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     log_probs = torch.nested.nested_tensor_from_jagged(log_probs, cu_seqlens)
                 if calculate_entropy:
                     entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
+                if calculate_ea:
+                    ea_entropy = torch.nested.nested_tensor_from_jagged(ea_entropy_rmpad, cu_seqlens)
                 if calculate_sum_pi_squared:
                     sum_pi_squared = torch.nested.nested_tensor_from_jagged(sum_pi_squared_rmpad, cu_seqlens)
             else:
@@ -1492,6 +1504,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 if calculate_sum_pi_squared:
                     sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits)
 
+                if calculate_ea:
+                    ea_entropy = entropy_advantage_from_logits(logits, chunk_size=ea_chunk_size)
+
                 if pad_mode == DatasetPadMode.NO_PADDING:
                     cu_seqlens = input_ids.offsets()
                     seq_lengths = cu_seqlens.diff()
@@ -1525,6 +1540,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         entropy = torch.nested.narrow(entropy, 1, starts, seq_lengths, layout=torch.jagged)
                         entropy_rmpad = torch.cat([t for t in entropy.unbind()])
                         entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
+                    if calculate_ea:
+                        ea_entropy = torch.nested.narrow(ea_entropy, 1, starts, seq_lengths, layout=torch.jagged)
+                        ea_entropy_rmpad = torch.cat([t for t in ea_entropy.unbind()])
+                        ea_entropy = torch.nested.nested_tensor_from_jagged(ea_entropy_rmpad, cu_seqlens)
                     if calculate_sum_pi_squared:
                         sum_pi_squared = torch.nested.narrow(
                             sum_pi_squared, 1, starts, seq_lengths, layout=torch.jagged
@@ -1538,6 +1557,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             model_output["log_probs"] = log_probs
         if calculate_entropy:
             model_output["entropy"] = entropy
+        if calculate_ea:
+            model_output["ea_entropy"] = ea_entropy
         if calculate_sum_pi_squared:
             model_output["sum_pi_squared"] = sum_pi_squared
 

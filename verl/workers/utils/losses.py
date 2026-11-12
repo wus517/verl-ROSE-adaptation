@@ -22,6 +22,8 @@ from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
+from verl.workers.config.actor import get_entropy_advantage_config
+from verl.workers.utils.entropy_advantage import shape_entropy_advantage
 from verl.workers.utils.padding import no_padding_2_padding
 
 
@@ -56,6 +58,7 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
+    original_data = data
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     entropy = model_output.get("entropy", None)
     if entropy is not None:
@@ -95,6 +98,28 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     old_log_prob = data["old_log_probs"]
     advantages = data["advantages"]
     rollout_is_weights = data.get("rollout_is_weights", None)
+
+    ea = get_entropy_advantage_config(config)
+    if ea.active:
+        if config.entropy_coeff != 0 or config.policy_loss.get("loss_mode", "vanilla") != "vanilla":
+            raise ValueError("Entropy advantage requires vanilla policy loss and entropy_coeff=0")
+        if "ea_entropy" not in model_output:
+            raise ValueError("EA active but model_output['ea_entropy'] missing; check actor entropy request metadata")
+        ea_entropy = no_padding_2_padding(model_output["ea_entropy"], data=original_data)
+        advantages, _, ea_stats = shape_entropy_advantage(
+            advantages, ea_entropy, response_mask, coef=ea.coef, kappa=ea.kappa
+        )
+        # Transfer only scalar statistics together, not separate accelerator synchronizations.
+        ea_stat_values = torch.stack(list(ea_stats.values())).detach().cpu().tolist()
+        # Metric.aggregate_dp averages ranks even for SUM. Compensate locally, then sum mini-batches.
+        metrics.update(
+            {
+                "ea/raw/" + name: Metric(
+                    value=value * config.global_batch_info["dp_size"], aggregation=AggregationType.SUM
+                )
+                for name, value in zip(ea_stats, ea_stat_values, strict=True)
+            }
+        )
 
     loss_agg_mode = config.loss_agg_mode
 

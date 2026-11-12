@@ -85,6 +85,43 @@ def _validate_router_replay_config(actor_config: Any, rollout_correction: Any) -
         )
 
 
+def validate_entropy_advantage_config(config) -> None:
+    """Fail before model loading for EA combinations not validated by the ROSE implementation."""
+    from verl.workers.config.actor import get_entropy_advantage_config
+
+    actor = config.actor_rollout_ref.actor
+    ea = get_entropy_advantage_config(actor)
+    if not ea.active:
+        return
+    rollout = config.actor_rollout_ref.rollout
+    model = config.actor_rollout_ref.model
+    checks = {
+        "trainer.use_v1=True": OmegaConf.select(config, "trainer.use_v1", default=False),
+        "trainer.v1.trainer_mode=sync": OmegaConf.select(config, "trainer.v1.trainer_mode") == "sync",
+        "algorithm.adv_estimator=rose_tree": config.algorithm.adv_estimator == "rose_tree",
+        "ROSE rollout enabled": rollout.get("rose", {}).get("enable", False),
+        "RoseAgentLoopManagerTQ": rollout.agent.agent_loop_manager_class
+        == "verl.experimental.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ",
+        "actor.strategy=fsdp/fsdp2": actor.strategy in ("fsdp", "fsdp2"),
+        "rollout.name=vllm": rollout.name == "vllm",
+        "policy_loss.loss_mode=vanilla": actor.policy_loss.get("loss_mode", "vanilla") == "vanilla",
+        "rollout.temperature=1.0": rollout.temperature == 1.0,
+        "actor.entropy_coeff=0": actor.entropy_coeff == 0,
+        "distillation disabled": not OmegaConf.select(config, "distillation.enabled", default=False),
+        "non-fused logits": not model.get("use_fused_kernels", False)
+        and not actor.get("use_fused_kernels", False)
+        and not actor.get("fsdp_config", {}).get("use_fused_kernels", False),
+        "actor SP=1": actor.get("ulysses_sequence_parallel_size", 1) == 1
+        and actor.get("fsdp_config", {}).get("ulysses_sequence_parallel_size", 1) == 1,
+        "single-turn rollout": not rollout.get("multi_turn", {}).get("enable", False)
+        and rollout.agent.default_agent_loop == "single_turn_agent",
+        "prefix grouper disabled": not actor.get("use_prefix_grouper", False),
+    }
+    unsupported = [name for name, valid in checks.items() if not valid]
+    if unsupported:
+        raise ValueError("Entropy advantage currently requires: " + "; ".join(unsupported))
+
+
 def validate_config(
     config: DictConfig,
     use_reference_policy: bool,
@@ -97,6 +134,7 @@ def validate_config(
         use_reference_policy (bool): is ref policy needed
         use_critic (bool): is critic needed
     """
+    validate_entropy_advantage_config(config)
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 

@@ -92,6 +92,24 @@ loss_scale_factor: null
 # Entropy regularization coefficient in PPO loss
 entropy_coeff: 0
 
+# Detached current-policy entropy advantage; does not enable entropy regularization.
+entropy_advantage:
+
+  # Typed schema for Hydra recursive instantiation.
+  _target_: verl.workers.config.actor.EntropyAdvantageConfig
+
+  # Disabled by default to preserve existing training behavior.
+  enable: false
+
+  # Scaling coefficient for the entropy offset.
+  coef: 0.1
+
+  # Offset cap is abs(advantage) / kappa; must be greater than one.
+  kappa: 2.0
+
+  # Number of token positions per full-vocabulary entropy chunk.
+  entropy_chunk_size: 64
+
 # When true, the actor forward will request entropy from the model
 calculate_entropy: false
 

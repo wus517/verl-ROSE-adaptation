@@ -105,6 +105,7 @@ def test_generate_from_prefix_consumes_topk_and_preserves_prefix():
                 token_ids=[13, 14],
                 log_probs=[-0.3, -0.4],
                 num_preempted=0,
+                stop_reason="length",
                 extra_fields={
                     "global_steps": 3,
                     "min_global_steps": 3,
@@ -120,6 +121,7 @@ def test_generate_from_prefix_consumes_topk_and_preserves_prefix():
         agent_loop = RoseAgentLoop.__new__(RoseAgentLoop)
         agent_loop.rollout_config = SimpleNamespace(response_length=4)
         agent_loop.server_manager = server
+        agent_loop.tokenizer = SimpleNamespace(decode=lambda ids, **kwargs: str(ids))
 
         output, topk_ids, topk_logprobs, topk_valid_mask = await agent_loop.generate_from_prefix(
             request_id="rose-test",

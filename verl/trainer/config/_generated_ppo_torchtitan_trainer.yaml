@@ -77,6 +77,12 @@ actor_rollout_ref:
     loss_agg_mode: token-mean
     loss_scale_factor: null
     entropy_coeff: 0
+    entropy_advantage:
+      _target_: verl.workers.config.actor.EntropyAdvantageConfig
+      enable: false
+      coef: 0.1
+      kappa: 2.0
+      entropy_chunk_size: 64
     calculate_entropy: false
     calculate_sum_pi_squared: false
     use_kl_loss: false
