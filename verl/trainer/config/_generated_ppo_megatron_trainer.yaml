@@ -393,6 +393,24 @@ actor_rollout_ref:
       semantic_chunk_size: 256
       exclude_semantic_diagonal: true
       validation_mode: independent
+      lookahead:
+        _target_: verl.workers.config.RoseLookaheadConfig
+        enable: false
+        mode: sampled_probe
+        windows:
+        - 20
+        - 30
+        - 50
+        edit_distance_threshold: 0.4
+        max_trials_per_pivot: 2
+        max_pivots_per_slot: 4
+        max_probe_tokens_per_group: 700
+        fallback: root_restart
+        short_terminal_policy: keep_nonduplicate
+        request_timeout_seconds: 600.0
+        trace_dir: null
+        trace_max_events_per_group: 64
+        trace_include_token_ids: false
     checkpoint_engine:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: naive

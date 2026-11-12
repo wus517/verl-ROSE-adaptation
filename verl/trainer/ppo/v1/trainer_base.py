@@ -163,6 +163,24 @@ def _compute_rose_rollout_metrics(
         total_generation_seconds = float(np.sum(generation_seconds))
         if total_generation_seconds > 0:
             metrics["rose/semantic_score_fraction_of_generation"] = total_semantic_seconds / total_generation_seconds
+    groups = {}
+    for row in selected_rows:
+        summary = row.get("rose_lookahead_group")
+        if not isinstance(summary, Mapping):
+            continue
+        tree_id = summary["tree_id"]
+        if tree_id in groups and groups[tree_id] != summary:
+            raise ValueError(f"Inconsistent ROSE lookahead summary for tree {tree_id}")
+        groups[tree_id] = dict(summary)
+    if groups:
+        metrics["rose_lookahead/retained_groups"] = float(len(groups))
+        names = set().union(*(group.keys() for group in groups.values())) - {"tree_id"}
+        for name in names:
+            metrics[f"rose_lookahead/retained_{name}_sum"] = float(sum(g.get(name, 0) for g in groups.values()))
+        attempts = sum(g.get("probe_attempts", 0) for g in groups.values())
+        if attempts:
+            for field in ("probe_full_window_accepted", "short_terminal_kept", "probe_rejected"):
+                metrics[f"rose_lookahead/{field}_ratio"] = sum(g.get(field, 0) for g in groups.values()) / attempts
     return metrics
 
 
@@ -1333,7 +1351,7 @@ class PPOTrainer(ABC):
     def _log_rollout_data(self, batch: KVBatchMeta, timing_raw: dict, rollout_data_dir: str):
         """Fetch rollout data from TransferQueue and dump sorted by uid."""
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-            fields = ["uid", "prompts", "responses", "rm_scores", "reward_model"]
+            fields = ["uid", "prompts", "responses", "rm_scores", "reward_model", "extra_fields"]
             data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id, select_fields=fields)
             data["prompts"] = data["prompts"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
             data["responses"] = data["responses"].to_padded_tensor(padding=self.tokenizer.pad_token_id)
@@ -1365,6 +1383,14 @@ class PPOTrainer(ABC):
             scores = [scores[i] for i in sorted_indices]
 
             reward_extra_infos_dict = {"uid": [batch.keys[i] for i in sorted_indices]}
+            extras = data.pop("extra_fields", None)
+            if extras is not None:
+                extras = extras.tolist() if hasattr(extras, "tolist") else list(extras)
+                for name in ("rose_lookahead_leaf", "rose_lookahead_group"):
+                    if any(isinstance(row, Mapping) and name in row for row in extras):
+                        reward_extra_infos_dict[name] = [
+                            extras[i].get(name) if isinstance(extras[i], Mapping) else None for i in sorted_indices
+                        ]
 
             self._dump_generations(
                 inputs=inputs,

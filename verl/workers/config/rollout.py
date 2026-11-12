@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
@@ -28,6 +29,7 @@ __all__ = [
     "CustomAsyncServerConfig",
     "AgentLoopConfig",
     "RoseRolloutConfig",
+    "RoseLookaheadConfig",
     "TraceConfig",
     "ServerConfig",
     "PrometheusConfig",
@@ -81,6 +83,44 @@ class AgentLoopConfig(BaseConfig):
 
 
 @dataclass
+class RoseLookaheadConfig(BaseConfig):
+    """Bounded, sampled lookahead at ROSE pivots (not the full online LATR decoder)."""
+
+    enable: bool = False
+    mode: str = "sampled_probe"
+    windows: list[int] = field(default_factory=lambda: [20, 30, 50])
+    edit_distance_threshold: float = 0.4
+    max_trials_per_pivot: int = 2
+    max_pivots_per_slot: int = 4
+    max_probe_tokens_per_group: int = 700
+    fallback: str = "root_restart"
+    short_terminal_policy: str = "keep_nonduplicate"
+    request_timeout_seconds: float = 600.0
+    trace_dir: Optional[str] = None
+    trace_max_events_per_group: int = 64
+    trace_include_token_ids: bool = False
+
+    def __post_init__(self) -> None:
+        if self.mode != "sampled_probe":
+            raise ValueError("ROSE lookahead mode must be sampled_probe")
+        if not self.windows or any(type(r) is not int or r < 1 for r in self.windows):
+            raise ValueError("ROSE lookahead windows must be positive integers")
+        if any(a >= b for a, b in zip(self.windows, self.windows[1:], strict=False)):
+            raise ValueError("ROSE lookahead windows must be strictly increasing")
+        if not math.isfinite(self.edit_distance_threshold) or not 0 <= self.edit_distance_threshold <= 1:
+            raise ValueError("ROSE lookahead edit_distance_threshold must be finite and in [0, 1]")
+        for name in ("max_trials_per_pivot", "max_pivots_per_slot", "trace_max_events_per_group"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
+                raise ValueError(f"ROSE lookahead {name} must be a positive integer")
+        if type(self.max_probe_tokens_per_group) is not int or self.max_probe_tokens_per_group < 0:
+            raise ValueError("ROSE lookahead max_probe_tokens_per_group must be a nonnegative integer")
+        if self.fallback != "root_restart" or self.short_terminal_policy != "keep_nonduplicate":
+            raise ValueError("ROSE lookahead requires root_restart fallback and keep_nonduplicate short terminals")
+        if not math.isfinite(self.request_timeout_seconds) or self.request_timeout_seconds <= 0:
+            raise ValueError("ROSE lookahead request_timeout_seconds must be finite and positive")
+
+
+@dataclass
 class RoseRolloutConfig(BaseConfig):
     enable: bool = False
     num_trajectories: Optional[int] = None
@@ -92,8 +132,11 @@ class RoseRolloutConfig(BaseConfig):
     semantic_chunk_size: int = 256
     exclude_semantic_diagonal: bool = True
     validation_mode: str = "independent"
+    lookahead: RoseLookaheadConfig = field(default_factory=RoseLookaheadConfig)
 
     def __post_init__(self) -> None:
+        if self.lookahead.enable and not self.enable:
+            raise ValueError("ROSE lookahead requires rollout.rose.enable=true")
         if self.num_trajectories is not None and self.num_trajectories < 1:
             raise ValueError(f"ROSE num_trajectories must be positive, got {self.num_trajectories}")
         if not 0.0 <= self.epsilon <= 1.0:

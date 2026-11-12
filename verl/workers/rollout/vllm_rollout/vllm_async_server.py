@@ -694,7 +694,14 @@ class vLLMHttpServer:
                     self._admitting -= 1
             assert final_res is not None
 
-        extra_fields = {"global_steps": self.global_steps}
+        extra_fields = {
+            "global_steps": self.global_steps,
+            "rollout_finish_reason": "abort" if not final_res.outputs else final_res.outputs[0].finish_reason,
+            "rollout_stop_detail": getattr(final_res.outputs[0], "stop_reason", None) if final_res.outputs else None,
+            "rollout_effective_max_tokens": max_tokens,
+            "rollout_input_tokens": len(prompt_ids),
+            "rollout_context_limit": self.config.max_model_len,
+        }
         # Handle abort case: when the request is aborted by pause_generation(abort),
         # outputs may be empty. Return empty results with stop_reason="aborted"
         # instead of crashing with "IndexError: list index out of range".

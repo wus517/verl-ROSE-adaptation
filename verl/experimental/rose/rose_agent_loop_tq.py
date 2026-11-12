@@ -14,6 +14,7 @@ import transfer_queue as tq
 
 from verl.experimental.agent_loop.agent_loop import DictConfigWrap
 from verl.experimental.rose import tree_advantage as _tree_advantage  # noqa: F401
+from verl.experimental.rose.lookahead_rollout import LookaheadRollout
 from verl.experimental.rose.rose_agent_loop import RoseAgentLoop
 from verl.experimental.rose.semantic_entropy import SemanticEntropyScorer
 from verl.experimental.rose.tree import BranchRecord, finalize_tree
@@ -110,6 +111,11 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
             raise ValueError("ROSE embedding_path must point to a prepared normalized embedding table")
 
         self.rose_config = rose_config
+        if rose_config.lookahead.enable:
+            if self.rollout_config.enable_rollout_routing_replay:
+                raise ValueError("ROSE lookahead does not support rollout routing replay")
+            if self.rollout_config.response_length < max(rose_config.lookahead.windows):
+                logger.warning("ROSE response_length is shorter than lookahead windows; branch slots will fall back")
         self.semantic_scorer = SemanticEntropyScorer(
             rose_config.embedding_path,
             metadata_path=rose_config.embedding_meta_path,
@@ -139,6 +145,9 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
         partition_id = "train"
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         postprocess_tasks: list[asyncio.Task] = []
+        lookahead = None
+        final_status = "failure"
+        failure_reason = None
         try:
             agent_name = prompt.pop("agent_name", "single_turn_agent")
             if agent_name != "single_turn_agent":
@@ -158,8 +167,7 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
             if not do_sample:
                 apply_greedy_sampling_params(run_sampling_params)
             run_sampling_params["logprobs"] = int(self.rose_config.top_k)
-            #run_sampling_params["logprobs"] = 0
-
+            # run_sampling_params["logprobs"] = 0
 
             agent_loop = self._make_agent_loop()
             prompt_ids = await agent_loop.build_prompt(prompt["raw_prompt"])
@@ -168,7 +176,30 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
             rng = random.Random(_seed_for_prompt(self.rollout_config.seed, uid, global_steps))
             trajectories: list[_Trajectory] = []
 
-            for trajectory_id in range(num_trajectories):
+            if self.rose_config.lookahead.enable:
+                lookahead = LookaheadRollout(
+                    agent_loop=agent_loop,
+                    scorer=self.semantic_scorer,
+                    config=self.rose_config.lookahead,
+                    response_length=self.rollout_config.response_length,
+                    uid=uid,
+                    step=global_steps,
+                    seed=_seed_for_prompt(self.rollout_config.seed, uid, global_steps),
+                    sampling_params=run_sampling_params,
+                    priority=int(prompt.get("priority", 0)),
+                )
+                for slot in range(num_trajectories):
+                    trajectories.append(
+                        await lookahead.generate_slot(
+                            prompt_ids,
+                            trajectories,
+                            slot,
+                            rng,
+                            self.rose_config.epsilon,
+                        )
+                    )
+
+            for trajectory_id in range(0 if lookahead is not None else num_trajectories):
                 selected_branch = _choose_branch(trajectories, rng, self.rose_config.epsilon)
                 root_restart = selected_branch is None
                 if root_restart:
@@ -269,8 +300,11 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
                     for trajectory_id, item in enumerate(trajectories)
                 ],
             )
+            lookahead_summary = lookahead.summary() if lookahead is not None else None
             for trajectory_id, item in enumerate(trajectories):
                 item.output.extra_fields["rose_tree_metadata"] = tree_metadata[trajectory_id]
+                if lookahead is not None:
+                    item.output.extra_fields["rose_lookahead_group"] = dict(lookahead_summary)
                 postprocess_kwargs = {**prompt, "uid": uid, "session_id": trajectory_id}
                 postprocess_tasks.append(
                     asyncio.create_task(self._agent_loop_postprocess(item.output, False, **postprocess_kwargs))
@@ -289,11 +323,18 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
             else:
                 status = "finished"
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status})
-        except Exception:
+            final_status = status
+            if errors:
+                failure_reason = "postprocess_failure"
+        except Exception as error:
+            failure_reason = f"{type(error).__name__}: {error}"
             logger.exception("Error generating ROSE tree uid=%s", uid)
             if postprocess_tasks:
                 await asyncio.gather(*postprocess_tasks, return_exceptions=True)
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+        finally:
+            if lookahead is not None:
+                lookahead.finish(final_status, failure_reason)
 
 
 RoseAgentLoopWorkerTQ = ray.remote(RoseAgentLoopWorkerTQBase)
