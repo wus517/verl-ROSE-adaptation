@@ -78,18 +78,18 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 mm_processor_kwargs=mm_processor_kwargs,
                 priority=priority,
             )
-        logger.warning(
-            "[NORMAL_RAW_OUTPUT] prompt_len=%d output_len=%d "
-            "stop_reason=%s sampling_params=%s "
-            "ids_head=%s ids_tail=%s",
-            len(prompt_ids),
-            len(output.token_ids),
-            output.stop_reason,
-            sampling_params,
-            output.token_ids[:100],
-            output.token_ids[-100:],
-        )
-
+        # print(
+        #     "[NORMAL_RAW_OUTPUT]",
+        #     f"file={__file__}",
+        #     f"pid={os.getpid()}",
+        #     f"prompt_len={len(prompt_ids)}",
+        #     f"output_len={len(output.token_ids)}",
+        #     f"stop_reason={output.stop_reason}",
+        #     f"sampling_params={sampling_params}",
+        #     f"ids_head={list(output.token_ids[:100])}",
+        #     f"ids_tail={list(output.token_ids[-100:])}",
+        #     flush=True,
+        # )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
 

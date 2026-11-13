@@ -192,6 +192,49 @@ server 测试从实际 `vLLMHttpServer.generate` AST 编译该方法，替换引
 
 首版 A 代码、独立服务器脚本、本地可运行验收和服务器 smoke 指南已落盘；不声称完成 NPU 实机验收或完整在线 LATR。未 commit、push 或开 PR，用户论文保持不动。
 
+## 2026-11-13：同步 main 的 agent loop 修改
+
+用户要求将 main 上四个 agent loop 文件的修改同步到当前 `rose-plus-latr`，不覆盖融合实现。
+
+### 来源与合入方式
+
+- 本次同步前当前分支 HEAD：`d9fbee53`；main HEAD：`fe2d4959`（`change verl`）；共同基线：`e77dceb5`。
+- 逐项核对 `e77dceb5..main` 在四个指定文件中的改动，按行为手动适配；没有 checkout 整文件，没有 merge/cherry-pick 或创建提交。
+- `agent_loop.py`：关闭原始 messages print。
+- `single_turn_agent_loop.py`：按 main 将 NORMAL_RAW_OUTPUT 改为注释中的 print，正常运行不再执行该输出。
+- `rose_agent_loop.py`：关闭 ROSE_PROMPT_PATH / ROSE_PROMPT / ROSE_RAW_OUTPUT 诊断，注释保留 print 模板；把 main 的 logprobs=0 空 top-k 路径迁移到当前 `generate_segment`，保留 segment 长度、logprob 和 raw stop 校验。
+- `rose_agent_loop_tq.py`：关闭旧 ROSE_PROGRESS 诊断，保留注释 print 模板；当前 lookahead 分支、版本校验、finalize/TQ 流程保留。
+- 没有复制 main 的重复 `import time`、文件末尾缺换行及纯空白差异。当前 raw_token_ids 仅供诊断，因此也随诊断模板注释，避免无用列表复制。
+- 新增的 ROSE_LOOKAHEAD_PROGRESS / ROSE_LOOKAHEAD_GROUP 日志不属于 main 关闭的旧诊断，保持原行为。
+
+### logprobs=0 的边界（本次初始同步行为，已被下方用户决策替代）
+
+此值表示仍请求 sampled-token logprobs，但不要求候选 top-k payload；helper 返回 `(新 token 数, 0)` 的数组。它是诊断兼容路径，不是正常 ROSE 高熵选点模式。候选不足的位置被原有控制流置为非有限评分；没有合法分支时回退根部采样。正常 worker 仍设置 `logprobs=rose.top_k`，本次没有把它改为 0。
+
+### 验证
+
+新增 4 个参数化 CPU 测试：strict 与兼容模式下无 top-k 的 logprobs=0 路径；非零/未指定请求仍对缺失 top-k 报错。测试同时检查 sampled logprobs、dtype、预算/停止契约、调用参数不变，以及诊断关闭后不触发 tokenizer.decode。
+
+```text
+UV_CACHE_DIR=/tmp/rose-latr-uv-cache uv run --no-sync pytest -q
+  tests/experimental/rose
+  tests/workers/rollout/test_rose_stop_metadata_on_cpu.py
+  tests/workers/rollout/test_llm_server_response_length_cap_on_cpu.py
+  tests/workers/rollout/test_llm_server_routed_experts_on_cpu.py
+  tests/experimental/agent_loop/test_agent_loop_extra_fields_schema_on_cpu.py
+=> 146 passed, 6 warnings，8.30 秒
+```
+
+六项 warning 来自既有 Ray deprecation 与可选训练引擎缺失。相关三个生产文件和测试文件 Ruff check 通过；ROSE 两个生产文件及测试 Ruff format --check 通过；git diff --check 通过。没有实际启动 Ray/vLLM-Ascend/NPU 训练，不能用此结果宣称服务器验收通过。
+
+## 2026-11-13：按用户要求移除 logprobs=0 兼容分支
+
+- 用户明确要求 `rose_agent_loop.py` 保持直接读取 packed top-k 的 try/except，不保留空数组回退。
+- 已恢复无条件读取三个 top-k 字段；字段缺失即报 `ROSE rollout requires packed top-k logprobs from the vLLM server`。即使请求为 logprobs=0，也不再构造空候选数组。
+- 之前 main 同步的其余诊断关闭改动与当前 lookahead 逻辑不变，正常 worker 仍请求 `rose.top_k`。
+- 将零候选兼容测试改为 strict/兼容模式下缺失 top-k 都报错，避免后续重新引入静默退化。
+- 验证：`UV_CACHE_DIR=/tmp/rose-latr-uv-cache uv run --no-sync pytest -q tests/experimental/rose/test_rollout_helpers_on_cpu.py tests/experimental/rose/test_lookahead_rollout_on_cpu.py`：47 passed，6 项既有 warning，5.58 秒；相关生产/测试文件 Ruff check 与 git diff --check 通过。未运行 NPU 训练。
+
 ## 后续条目模板
 
 每次实现追加：日期、基线、用户已确认目标、修改路径、数据契约、测试命令/结果、服务器证据、未解决问题、下一步。不能把计划中的测试填写为通过。

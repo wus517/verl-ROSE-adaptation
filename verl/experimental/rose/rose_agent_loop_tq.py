@@ -215,18 +215,19 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
                     prefix_logprobs = parent.output.response_logprobs[:branch_pos]
                     prefix_entropy = parent.semantic_entropy[:branch_pos]
 
-                logger.warning(
-                    "[ROSE_PROGRESS] uid=%s trajectory=%d/%d "
-                    "phase=generate_start root_restart=%s "
-                    "parent_trajectory_id=%s branch_pos=%d prefix_len=%d",
-                    uid,
-                    trajectory_id + 1,
-                    num_trajectories,
-                    root_restart,
-                    parent_trajectory_id,
-                    branch_pos,
-                    len(prefix_ids),
-                )
+                # print(
+                #     "[ROSE_PROGRESS]",
+                #     f"file={__file__}",
+                #     f"pid={os.getpid()}",
+                #     f"uid={uid}",
+                #     f"trajectory={trajectory_id + 1}/{num_trajectories}",
+                #     "phase=generate_start",
+                #     f"root_restart={root_restart}",
+                #     f"parent_trajectory_id={parent_trajectory_id}",
+                #     f"branch_pos={branch_pos}",
+                #     f"prefix_len={len(prefix_ids)}",
+                #     flush=True,
+                # )
                 output, topk_ids, topk_logprobs, topk_valid_mask = await agent_loop.generate_from_prefix(
                     request_id=f"rose-{uid}-{trajectory_id}",
                     prompt_ids=prompt_ids,
@@ -235,16 +236,17 @@ class RoseAgentLoopWorkerTQBase(AgentLoopWorkerTQBase):
                     sampling_params=run_sampling_params,
                     priority=int(prompt.get("priority", 0)),
                 )
-                logger.warning(
-                    "[ROSE_PROGRESS] uid=%s trajectory=%d/%d "
-                    "phase=generate_finished response_len=%d "
-                    "generation_seconds=%.3f",
-                    uid,
-                    trajectory_id + 1,
-                    num_trajectories,
-                    len(output.response_ids),
-                    float(output.metrics.generate_sequences),
-                )
+                # print(
+                #     "[ROSE_PROGRESS]",
+                #     f"file={__file__}",
+                #     f"pid={os.getpid()}",
+                #     f"uid={uid}",
+                #     f"trajectory={trajectory_id + 1}/{num_trajectories}",
+                #     "phase=generate_finished",
+                #     f"response_len={len(output.response_ids)}",
+                #     f"generation_seconds={float(output.metrics.generate_sequences):.3f}",
+                #     flush=True,
+                # )
                 semantic_score_started = time.perf_counter()
                 continuation_entropy = self.semantic_scorer.score(topk_ids, topk_logprobs, topk_valid_mask)
                 # if topk_ids.shape[1] == 0:

@@ -142,6 +142,70 @@ def test_generate_from_prefix_consumes_topk_and_preserves_prefix():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("strict", [False, True])
+def test_generate_segment_zero_logprobs_without_topk_fails(strict):
+    class FakeServer:
+        async def generate(self, **kwargs):
+            assert kwargs["sampling_params"] == {"logprobs": 0, "max_tokens": 2}
+            return SimpleNamespace(
+                token_ids=[13, 14],
+                log_probs=[-0.3, -0.4],
+                num_preempted=0,
+                extra_fields={
+                    "rollout_finish_reason": "stop",
+                    "rollout_effective_max_tokens": 2,
+                    "rollout_input_tokens": 3,
+                    "rollout_context_limit": 10,
+                },
+            )
+
+    class NoDiagnosticDecode:
+        def decode(self, *args, **kwargs):
+            raise AssertionError("Disabled diagnostics must not decode generated tokens")
+
+    async def run():
+        helper = RoseAgentLoop.__new__(RoseAgentLoop)
+        helper.rollout_config = SimpleNamespace(response_length=4)
+        helper.server_manager = FakeServer()
+        helper.tokenizer = NoDiagnosticDecode()
+        sampling_params = {"logprobs": 0}
+        with pytest.raises(RuntimeError, match="requires packed top-k"):
+            await helper.generate_segment(
+                request_id="zero-logprobs",
+                prompt_ids=[1, 2],
+                prefix_ids=[11],
+                sampling_params=sampling_params,
+                max_new_tokens=2,
+                strict=strict,
+            )
+        assert sampling_params == {"logprobs": 0}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("requested_logprobs", [None, 2])
+def test_generate_segment_missing_topk_still_fails_for_nonzero_requests(requested_logprobs):
+    class FakeServer:
+        async def generate(self, **kwargs):
+            return SimpleNamespace(token_ids=[13], log_probs=[-0.3], num_preempted=0, extra_fields={})
+
+    async def run():
+        helper = RoseAgentLoop.__new__(RoseAgentLoop)
+        helper.rollout_config = SimpleNamespace(response_length=4)
+        helper.server_manager = FakeServer()
+        with pytest.raises(RuntimeError, match="requires packed top-k"):
+            await helper.generate_segment(
+                request_id="missing-topk",
+                prompt_ids=[1],
+                prefix_ids=[],
+                sampling_params={"logprobs": requested_logprobs},
+                max_new_tokens=2,
+                strict=False,
+            )
+
+    asyncio.run(run())
+
+
 def test_compute_rose_rollout_metrics_ignores_padding_and_reports_timing():
     rows = [
         {
