@@ -112,23 +112,23 @@ class RoseAgentLoop(AgentLoopBase):
                 f"{len(continuation_ids)} tokens"
             )
 
-        # try:
-        #     topk_token_ids = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_TOKEN_IDS_FIELD))
-        #     topk_logprobs = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_LOGPROBS_FIELD))
-        #     topk_valid_mask = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_VALID_MASK_FIELD))
-        # except KeyError as exc:
-        #     raise RuntimeError("ROSE rollout requires packed top-k logprobs from the vLLM server") from exc
-        if sampling_params.get("logprobs") == 0:
-            topk_token_ids = np.empty((len(continuation_ids),0),dtype=np.int32)
-            topk_logprobs = np.empty((len(continuation_ids),0),dtype=np.float32)
-            topk_valid_mask = np.empty((len(continuation_ids),0),dtype=np.bool_)
-        else:
-            try:
-                topk_token_ids = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_TOKEN_IDS_FIELD))
-                topk_logprobs = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_LOGPROBS_FIELD))
-                topk_valid_mask = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_VALID_MASK_FIELD))
-            except KeyError as exc:
-                raise RuntimeError("ROSE rollout requires packed top-k logprobs from the vLLM server") from exc
+        try:
+            topk_token_ids = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_TOKEN_IDS_FIELD))
+            topk_logprobs = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_LOGPROBS_FIELD))
+            topk_valid_mask = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_VALID_MASK_FIELD))
+        except KeyError as exc:
+            raise RuntimeError("ROSE rollout requires packed top-k logprobs from the vLLM server") from exc
+        # if sampling_params.get("logprobs") == 0:
+        #     topk_token_ids = np.empty((len(continuation_ids),0),dtype=np.int32)
+        #     topk_logprobs = np.empty((len(continuation_ids),0),dtype=np.float32)
+        #     topk_valid_mask = np.empty((len(continuation_ids),0),dtype=np.bool_)
+        # else:
+        #     try:
+        #         topk_token_ids = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_TOKEN_IDS_FIELD))
+        #         topk_logprobs = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_LOGPROBS_FIELD))
+        #         topk_valid_mask = np.asarray(token_output.extra_fields.pop(ROSE_TOPK_VALID_MASK_FIELD))
+        #     except KeyError as exc:
+        #         raise RuntimeError("ROSE rollout requires packed top-k logprobs from the vLLM server") from exc
                 
         expected_length = len(continuation_ids)
         if topk_token_ids.shape[0] != expected_length:
