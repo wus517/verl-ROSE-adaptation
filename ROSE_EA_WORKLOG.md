@@ -158,3 +158,9 @@ UV_CACHE_DIR=/tmp/verl-rose-ea-uv-cache uv run --no-sync python -m pytest -q \
 - 关闭 prompt 的直接打印；将 NORMAL_RAW_OUTPUT、ROSE_PROMPT_PATH、ROSE_PROMPT、ROSE_RAW_OUTPUT、ROSE_PROGRESS 的 warning 调试块同步为 main 中已注释的 print 块。保留 main 的关闭状态，没有重新启用 print。
 - 不引入 main 中重复的 `import time` 和新增行尾空格，保留文件末尾换行。ROSE 采样、树优势、EA 实现和运行脚本未改变。
 - 验证：`UV_CACHE_DIR=/tmp/verl-rose-ea-uv-cache uv run --no-sync python -m pytest -q tests/experimental/rose --tb=short`，结果 **128 passed**；`git diff --check` 通过。未运行 NPU 训练；未提交或推送。
+
+## 2026-11-13：新增开启动态组过滤的运行脚本
+
+- 新增根目录 `run_rose_ea_filter_groups.sh`，完整复制 `run_rose_ea.sh`，仅增加 `algorithm.filter_groups.enable=True`、`algorithm.filter_groups.metric=reward` 两行。原脚本、训练代码、数据/模型/reward 路径及其余超参数不变。
+- 保留 `sync_refill_failed_groups=True`，它处理失败组，不替代同奖励组过滤。README 增加新脚本入口，避免把原脚本的关闭过滤状态误认为新脚本状态。
+- `bash -n run_rose_ea_filter_groups.sh` 通过；与原脚本比较仅上述两行不同。未执行脚本部署或 NPU 训练。

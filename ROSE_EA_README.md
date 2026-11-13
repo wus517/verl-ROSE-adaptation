@@ -33,6 +33,8 @@ bash run_rose_ea.sh
 EA_ENABLE=False EXP_NAME=rose_control bash run_rose_ea.sh
 ```
 
+如需与开启动态组过滤的完整 ROSE 基线对齐，使用 [run_rose_ea_filter_groups.sh](run_rose_ea_filter_groups.sh)。它仅在上述脚本基础上增加 `algorithm.filter_groups.enable=True` 和 `algorithm.filter_groups.metric=reward`，其余配置不变；EA off/on 对照应统一使用这个新脚本，并设置不同 EXP_NAME/输出目录。原 `run_rose_ea.sh` 保留未过滤版本，本文及算法对比文档中关于该原脚本默认关闭过滤的描述仍然适用。
+
 上例需要已设置 BASE_PATH/SAVE_PATH 或原 `lhx_sh/lhx_save` 环境。所有节点应使用相同代码与 EA 设置。日志开头有 `[ROSE_EA]` 配置、代码来源和 helper SHA256；archive 没有 `.git` 时 commit 显示 not available 是预期行为。
 
 默认 checkpoint、log、TensorBoard、rollout history 使用 `rose_ea` 子目录，路径可覆盖。没有指定 `SAVELOG_FILE_NAME` 时用 `train.log`。`EA_ENABLE=False` 用不同 EXP_NAME，避免混入同一实验 checkpoint。
