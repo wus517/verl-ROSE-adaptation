@@ -151,3 +151,10 @@ UV_CACHE_DIR=/tmp/verl-rose-ea-uv-cache uv run --no-sync python -m pytest -q \
 - 按用户要求在分支根目录新增 `ROSE_EA_ALGORITHM_COMPARISON.md`，整理 ROSE/EA 论文算法、当前组合公式、工程实现与近似、运行脚本相对论文的配置差异。
 - 明确区分 ROSE top-K 语义评分与 EA 当前策略全词表熵，说明默认 alpha=0、同奖励组过滤关闭，以及失败补采不等于动态过滤。
 - README 增加入口；未改 Python、YAML、运行脚本或论文，没有重新运行算法测试、部署或训练。
+
+## 2026-11-13：同步 main 的 rollout 调试输出修改
+
+- 来源：本地 `main` 的 `afaf1a3d`；同步用户指定的 `agent_loop.py`、`single_turn_agent_loop.py`、`rose_agent_loop_tq.py`、`rose_agent_loop.py`，未合并其他文件或切换分支。
+- 关闭 prompt 的直接打印；将 NORMAL_RAW_OUTPUT、ROSE_PROMPT_PATH、ROSE_PROMPT、ROSE_RAW_OUTPUT、ROSE_PROGRESS 的 warning 调试块同步为 main 中已注释的 print 块。保留 main 的关闭状态，没有重新启用 print。
+- 不引入 main 中重复的 `import time` 和新增行尾空格，保留文件末尾换行。ROSE 采样、树优势、EA 实现和运行脚本未改变。
+- 验证：`UV_CACHE_DIR=/tmp/verl-rose-ea-uv-cache uv run --no-sync python -m pytest -q tests/experimental/rose --tb=short`，结果 **128 passed**；`git diff --check` 通过。未运行 NPU 训练；未提交或推送。
