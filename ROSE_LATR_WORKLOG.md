@@ -235,6 +235,13 @@ UV_CACHE_DIR=/tmp/rose-latr-uv-cache uv run --no-sync pytest -q
 - 将零候选兼容测试改为 strict/兼容模式下缺失 top-k 都报错，避免后续重新引入静默退化。
 - 验证：`UV_CACHE_DIR=/tmp/rose-latr-uv-cache uv run --no-sync pytest -q tests/experimental/rose/test_rollout_helpers_on_cpu.py tests/experimental/rose/test_lookahead_rollout_on_cpu.py`：47 passed，6 项既有 warning，5.58 秒；相关生产/测试文件 Ruff check 与 git diff --check 通过。未运行 NPU 训练。
 
+## 2026-11-13：新增启用动态组过滤的独立启动脚本
+
+- 用户要求另建脚本，保留原 `run_rose_latr.sh`。
+- 新增可执行 `run_rose_latr_dapo.sh`，完整复用当前融合脚本，仅在训练命令添加 `algorithm.filter_groups.enable=True` 与 `algorithm.filter_groups.metric=reward`，并更新脚本头部的使用说明。
+- 模型、数据、reward、NPU/Ray 环境、lookahead、epsilon、alpha、loss 和输出目录等配置均未改动。脚本名中的 dapo 表示启用 DAPO 风格的组过滤，不代表切换为完整 DAPO 优化目标。
+- `bash -n` 通过；源码 diff 确认仅上述配置和说明差异，新增文件无空白错误。未启动服务器训练。
+
 ## 后续条目模板
 
 每次实现追加：日期、基线、用户已确认目标、修改路径、数据契约、测试命令/结果、服务器证据、未解决问题、下一步。不能把计划中的测试填写为通过。
