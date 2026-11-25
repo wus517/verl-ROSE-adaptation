@@ -1,297 +1,573 @@
-#!/usr/bin/env bash
-# ROSE tree rollouts with the STEER actor update on datav8 / Ascend 910B.
-set -eo pipefail
+#!/bin/bash
+set -x
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-cd -- "${VERL_PROJECT_ROOT:-$SCRIPT_DIR}"
-PROJECT_ROOT=$PWD
-PYTHON_BIN=${PYTHON_BIN:-python3}
-export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+# GRPO | Qwen3.5-35B | mm_k12_math | vLLM rollout | FSDP | Ascend 910B multi-node
+# 多节点版本：纯 GRPO + 规则奖励（rule-only），无 GenRM
+#
+# 与 run_qwen3_5_grpo_910b_fsdp_reward_35b_image_test_zsg.sh 的差异：
+#   - 删除所有 GRM_* 配置和 env 透传
+#   - 删除 reward.reward_model.* 与 reward.custom_reward_function.*
+#   - reward 流走 verl/utils/reward_score/__init__.py:default_compute_score，
+#     按 parquet 里 data_source=="mm_k12_math" 分发到
+#     mm_k12_math_penalty_07311944.compute_score（见 __init__.py:93-100）
+#   - trainer 占用全部 NNODES（不再为 GenRM 预留 GRM_NNODES）
+#
+# dependency: NPU vllm==0.18.0, vllm-ascend@<54879467>, transformers@<cc7ab9be>
 
-BASE_PATH=${BASE_PATH:-${lhx_sh:-}}
-SAVE_PATH=${SAVE_PATH:-${lhx_save:-}}
-XYI_DIR="$BASE_PATH/xyi/v8_all"
-TRAIN_FILE=${TRAIN_FILE:-$XYI_DIR/math.train.parquet}
-VAL_EASY=${VAL_EASY:-$XYI_DIR/math.val.easy.parquet}
-VAL_ABITHARD=${VAL_ABITHARD:-$XYI_DIR/math.val.a_bit_hard.parquet}
-VAL_HARD=${VAL_HARD:-$XYI_DIR/math.val.hard.parquet}
-VAL_VERYHARD=${VAL_VERYHARD:-$XYI_DIR/math.val.very_hard.parquet}
-TEST_EASY=${TEST_EASY:-$XYI_DIR/math.test.easy.parquet}
-TEST_ABITHARD=${TEST_ABITHARD:-$XYI_DIR/math.test.a_bit_hard.parquet}
-TEST_HARD=${TEST_HARD:-$XYI_DIR/math.test.hard.parquet}
-TEST_VERYHARD=${TEST_VERYHARD:-$XYI_DIR/math.test.very_hard.parquet}
-REWARD_FILE=${REWARD_FILE:-$XYI_DIR/verify_choice_answer_new_v4.py}
-REWARD_NUM_WORKERS=${REWARD_NUM_WORKERS:-16}
+echo "datetime: $(date +'%Y-%m-%d %H:%M:%S')"
+echo $MA_CURRENT_HOST_IP
+echo $MA_CURRENT_IP
 
-MODEL_PATH=${MODEL_PATH:-$BASE_PATH/model/Qwen3_5_9B}
-NNODES=${NNODES:-${MA_NUM_HOSTS:-1}}
-NPUS_PER_NODE=${NPUS_PER_NODE:-${MA_NUM_GPUS:-8}}
-TRAINER_NNODES=${TRAINER_NNODES:-$NNODES}
-NTRAINER_GPUS_PER_NODE=${NTRAINER_GPUS_PER_NODE:-$NPUS_PER_NODE}
-PROJECT_NAME=${PROJECT_NAME:-verl_rose_steer_v1_datav8}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-${EXP_NAME:-qwen3_5_9b_rose_steer_v1}}
+################## 上海三方电信 代理配置 ##################
+PROXY_ADDR="http://10.31.196.119:80"
+export no_proxy="${no_proxy:+$no_proxy,}10.44.***.***"
+export http_proxy="$PROXY_ADDR"
+export https_proxy="$PROXY_ADDR"
+export HTTP_PROXY="$PROXY_ADDR"
+export HTTPS_PROXY="$PROXY_ADDR"
+export FTP_PROXY="$PROXY_ADDR"
+export ftp_proxy="$PROXY_ADDR"
+
+export LD_PRELOAD=/home/ma-user/Ascend/cann-8.5.2/lib64/libprofapi.so${LD_PRELOAD:+:$LD_PRELOAD}
+echo "***************************************** copy file *****************************************"
+WORKDIR=`pwd`
+echo "inital dictionary: $WORKDIR"
+PROJECT_ROOT=/cache/algorithm
+
+ROOT_PATH="/opt/huawei"
+cp -r ${ROOT_PATH}/schedule-train/algorithm ${PROJECT_ROOT}
+ls ${PROJECT_ROOT}
+
+# cp ${cq_qwen_datasets}/tools/cann_packages/cann852/Ascend-cann-toolkit_8.5.2_linux-aarch64.run ${PROJECT_ROOT}
+# cp ${cq_qwen_datasets}/tools/cann_packages/cann852/Ascend-cann-910b-ops_8.5.2_linux-aarch64.run ${PROJECT_ROOT}
+# cp ${cq_qwen_datasets}/tools/cann_packages/cann852/Ascend-cann-nnal_8.5.2_linux-aarch64.run ${PROJECT_ROOT}
+
+# ls ${PROJECT_ROOT}
+echo "***************************************** update cann *****************************************"
+ls /home/ma-user/
+ls /home/ma-user/Ascend/
+
+# cd ${PROJECT_ROOT}
+# chmod +777 ./Ascend-cann-*
+# ./Ascend-cann-toolkit_8.5.2_linux-aarch64.run --install --quiet
+source /home/ma-user/Ascend/cann-8.5.2/set_env.sh
+# ./Ascend-cann-910b-ops_8.5.2_linux-aarch64.run --install --quiet
+source /home/ma-user/Ascend/cann-8.5.2/set_env.sh
+# ./Ascend-cann-nnal_8.5.2_linux-aarch64.run --install --quiet
+source /home/ma-user/Ascend/nnal/atb/set_env.sh
+
+echo "--------------------- adapt MTP end!-----------------------"
+export NON_MEGATRON=true
+export MULTI_STREAM_MEMORY_REUSE=2
+export TASK_QUEUE_ENABLE=1
+export ASCEND_LAUNCH_BLOCKING=0
+export ACLNN_CACHE_LIMIT=100000
+export CPU_AFFINITY_CONF=1
+unset PYTORCH_NPU_ALLOC_CONF
+
+export ACL_OP_COMPILER_CACHE_DIR=$ACL_OP_COMPILER_CACHE_DIR
+export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib:/root/miniconda3/lib:$LD_LIBRARY_PATH
+export HCCL_EXEC_TIMEOUT=7200
+export HCCL_IF_BASE_PORT=64000
+export ACL_DEVICE_SYNC_TIMEOUT=7200
+export HCCL_CONNECT_TIMEOUT=7200
+export TORCH_DIST_TIMEOUT=3600
+export HCCL_OP_EXPANSION_MODE=AIV
+export LD_PRELOAD=/home/ma-user/Ascend/cann-8.5.2/lib64/libprofapi.so${LD_PRELOAD:+:$LD_PRELOAD}
+
+# echo "***************************************** Installing Pytorch *****************************************"
+# python3 -m pip install --upgrade pip
+# pip uninstall jsonnet -y || true
+# pip install --upgrade pip
+
+# cd ${PROJECT_ROOT}
+# pip install TransferQueue
+# pip install transferqueue-0.1.9.dev0-py3-none-any.whl
+# pip install torch==2.9.0
+# pip install torch_npu==2.9.0
+# pip uninstall torch_c_dlpack_ext -y || true
+# pip install triton_ascend==3.2.0
+# pip install torch==2.9.0
+# pip install torch_npu==2.9.0
+python -c "import torch;import torch_npu;print(torch_npu.npu.is_available())"
+
+
+# echo "*****************************************Start install transformers/vllm/vllm-ascend*****************************************"
+# cd ${PROJECT_ROOT}
+# pip install -r requirements-npu.txt
+# pip install pre-commit pylatexenc wandb qwen_vl_utils hf_transfer mathruler
+
+# pip install tokenizers==0.21.1 transformers==5.3.0 accelerate==1.2.0
+
+# pip install vllm==0.18.0
+# pip install vllm-ascend==0.18.0
+
+# pip install -U hydra-core codetiming
+
+# # ---- user-adjustable ----
+# # MODEL_SIZE: 4B | 35B
+# MODEL_SIZE=${MODEL_SIZE:-4B}
+
+# # 模型路径 & 多节点配置（按模型规模预设）
+# if [ "${MODEL_SIZE}" = "35B" ]; then
+#     MODEL_PATH=${MODEL_PATH:-${cq_qwen_datasets}/opensource_multimodal_models_guiyang/Qwen/Qwen3.5-35B-A3B/Qwen/Qwen3___5-35B-A3B}
+#     NNODES=${NNODES:-$MA_NUM_HOSTS}
+#     EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_5_35b_geo3k_grpo_910b_multi}
+# else
+#     MODEL_PATH=${MODEL_PATH:-/opt/huawei/dataset/wyb_qwen_small/Qwen3.5-4B}
+#     NNODES=${NNODES:-2}
+#     EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_5_4b_geo3k_grpo_910b_multi}
+# fi
+
+# <<< 修改：使用变量 BASE_PATH 指向 xyi 数据目录
+# ================= 数据集 & 奖励函数路径（xyi） =================
+# ${lnn_sh} 在环境中已定义；若没有，请手动改为绝对路径
+BASE_PATH=${BASE_PATH:-${lhx_sh}}
+SAVE_PATH=${SAVE_PATH:-${lhx_save}}
+echo "BASE_PATH resolved to: ${BASE_PATH}"
+
+XYI_DIR="${BASE_PATH}/xyi/v8_all"
+# TRAIN_FILE=${TRAIN_FILE:-${XYI_DIR}/extract_train.json}
+# VAL_FILE=${VAL_FILE:-${XYI_DIR}/extract_val.json}
+TRAIN_FILE=${TRAIN_FILE:-${XYI_DIR}/math.train.parquet}
+VAL_EASY=${VAL_EASY:-${XYI_DIR}/math.val.easy.parquet}
+VAL_ABITHARD=${VAL_ABITHARD:-${XYI_DIR}/math.val.a_bit_hard.parquet}
+VAL_HARD=${VAL_HARD:-${XYI_DIR}/math.val.hard.parquet}
+VAL_VERYHARD=${VAL_VERYHARD:-${XYI_DIR}/math.val.very_hard.parquet}
+TEST_EASY=${TEST_EASY:-${XYI_DIR}/math.test.easy.parquet}
+TEST_ABITHARD=${TEST_ABITHARD:-${XYI_DIR}/math.test.a_bit_hard.parquet}
+TEST_HARD=${TEST_HARD:-${XYI_DIR}/math.test.hard.parquet}
+TEST_VERYHARD=${TEST_VERYHARD:-${XYI_DIR}/math.test.very_hard.parquet}
+# 注意：你目录里实际文件名是 reward_xiaoyi.py，配置里写的是 reward_math_verifier.py
+# 二选一即可，下面默认使用 reward_xiaoyi.py，若已改名为 reward_math_verifier.py 请自行切换
+REWARD_FILE=${REWARD_FILE:-${XYI_DIR}/verify_choice_answer_new_v4.py}
+# REWARD_FILE=${REWARD_FILE:-${XYI_DIR}/reward_math_verifier.py}
+
+echo "TRAIN_FILE      = ${TRAIN_FILE}"
+# echo "VAL_FILE    = ${VAL_FILE}"
+# echo "VAL_FILE_HIGH   = ${VAL_FILE_HIGH}"
+# echo "VAL_FILE_LOW    = ${VAL_FILE_LOW}"
+echo "VAL_EASY   = ${VAL_EASY}"
+echo "VAL_ABITHARD    = ${VAL_ABITHARD}"
+echo "VAL_HARD   = ${VAL_HARD}"
+echo "VAL_VERYHARD     = ${VAL_VERYHARD}"
+echo "TEST_EASY   = ${TEST_EASY}"
+echo "TEST_ABITHARD    = ${TEST_ABITHARD}"
+echo "TEST_HARD   = ${TEST_HARD}"
+echo "TEST_VERYHARD     = ${TEST_VERYHARD}"
+pip install "accelerate>=1.6.0" -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -c "import accelerate; print(accelerate.__version__)"
+# ==========================ROSE配置=================================
+
+ROSE_EPSILON=${ROSE_EPSILON:-0.5} #
+ROSE_TOP_K=${ROSE_TOP_K:-20} 
+ROSE_SEMANTIC_CHUNK_SIZE=${ROSE_SEMANTIC_CHUNK_SIZE:-256}
+MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-5120} #
+# ===============================================================
+MODEL_PATH=${MODEL_PATH:-${BASE_PATH}/model/Qwen3_5_9B} #
+#MODEL_PATH=${MODEL_PATH:-${edu_gy_zsg}/qwen35_rl/openllm_model/Qwen/Qwen3___5-9B}
+# 基于以下ckpt，在学段遵从数据集上增训
+# MODEL_PATH=${MODEL_PATH:-${cq_qwen_datasets}/saved_models/rl_ckpt/qwen35_35b_64c_grm_0820_1130/global_step_240/huggingface_merged}
+NNODES=${NNODES:-$MA_NUM_HOSTS}
+EXP_NAME=${EXP_NAME}
+
+# ================= TensorBoard 输出目录（带时间戳） =================
 TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
-DEFAULT_LOCAL_DIR=${DEFAULT_LOCAL_DIR:-$SAVE_PATH/saved_models/rl_ckpt/rose_steer_v1/$EXPERIMENT_NAME}
-LOG_PATH=${LOG_PATH:-$SAVE_PATH/qwen35_rl/log/rose_steer_v1/$EXPERIMENT_NAME}
-export TENSORBOARD_DIR=${TENSORBOARD_DIR:-$SAVE_PATH/tensorboard/rose_steer_v1/${EXPERIMENT_NAME}_$TIMESTAMP}
-ROLLOUT_HISTORY_DIR=${ROLLOUT_HISTORY_DIR:-$SAVE_PATH/rollout_history/rose_steer_v1/${EXPERIMENT_NAME}_$TIMESTAMP}
-TRAIN_ROLLOUT_DIR="$ROLLOUT_HISTORY_DIR/train"
-VAL_ROLLOUT_DIR="$ROLLOUT_HISTORY_DIR/val"
-SAVELOG_FILE_NAME=${SAVELOG_FILE_NAME:-${EXPERIMENT_NAME}_$TIMESTAMP.log}
+TENSORBOARD_DIR="${SAVE_PATH}/tensorboard/rose_steer_v1/${EXP_NAME}_${TIMESTAMP}"
+mkdir -p "${TENSORBOARD_DIR}"
+echo "TENSORBOARD_DIR = ${TENSORBOARD_DIR}"
 
+# ========================== 保存rollout历史 =================================
+ROLLOUT_HISTORY_DIR="${SAVE_PATH}/rollout_history/rose_steer_v1/${EXP_NAME}_${TIMESTAMP}"
+
+TRAIN_ROLLOUT_DIR="${ROLLOUT_HISTORY_DIR}/train"
+VAL_ROLLOUT_DIR="${ROLLOUT_HISTORY_DIR}/val"
+
+mkdir -p "${TRAIN_ROLLOUT_DIR}" "${VAL_ROLLOUT_DIR}"
+
+echo "TRAIN_ROLLOUT_DIR = ${TRAIN_ROLLOUT_DIR}"
+echo "VAL_ROLLOUT_DIR   = ${VAL_ROLLOUT_DIR}"
+# ========================================================================
+NGPUS_PER_NODE=${MA_NUM_GPUS:-8}
+
+# ================= 规则奖励（rule-only）配置 =================
+# 不启用 GenRM，也不启动 reward_model router
+# reward 走 verl/utils/reward_score/__init__.py:default_compute_score
+# 按 data_source=="mm_k12_math" 分发到 mm_k12_math_penalty_07311944.compute_score
+# 若需要切换规则函数（如换用 mm_k12_math_penalty_new），修改 __init__.py 里 mm_k12_math 分支即可
+REWARD_NUM_WORKERS=${REWARD_NUM_WORKERS:-16}
+# ========================================================================
+
+# GRPO 不需要区分 Student/Teacher，整节点资源全给 actor/rollout/ref
+NTRAINER_GPUS_PER_NODE=${NTRAINER_GPUS_PER_NODE:-8}
+# rule-only：trainer 占用全部 NNODES（不再为 GenRM 预留节点）
+TRAINER_NNODES=${TRAINER_NNODES:-$NNODES}
+
+# /opt/huawei/dataset/cq_qwen_datasets/exp_train_json/train_rl_datasets_hard_8437_middle_1563_with_q_0724.parquet
+# /opt/huawei/dataset/cq_qwen_datasets/exp_train_json/test_rl_datasets_hard_8437_middle_1563_math_0724.parquet
+# /opt/huawei/dataset/Geometry3K/geo3k/train.parquet
+# /opt/huawei/dataset/Geometry3K/geo3k/test.parquet
+# TRAIN_FILE=${TRAIN_FILE:-/opt/huawei/dataset/cq_qwen_datasets/exp_train_json/train_rl_datasets_hard_8437_middle_1563_with_q_0724.parquet}
+# 0806和0814区别：只有extra_info的question字段有区别
+# TRAIN_FILE=${TRAIN_FILE:-/opt/huawei/dataset/cq_qwen_datasets/exp_train_json/train_rl_datasets_hard_8437_middle_1563_with_q_no_prompt2_0814.parquet}
+# 学段遵从训练集
+# TRAIN_FILE=${TRAIN_FILE:-${edu_gy_zsg}/qwen35_rl/rl_data/stage_compliance/rl/merged_rubric_stage_jihe_2598_0824.parquet}
+# lnn_sh
+# 原始在下一行
+# TRAIN_FILE=${TRAIN_FILE:-${cq_qwen_datasets}/rl_datasets/exp_rl_0910_397b/merged_all_rl_data_15k_0912.parquet}
+# TRAIN_FILE=${TRAIN_FILE:-${lnn_sh}/xyi/train.json}
+# TEST_FILE=${TEST_FILE:-${cq_qwen_datasets}/exp_train_json/test_rl_datasets_hard_8437_middle_1563_math_0724.parquet}
+# 原始在下一行
+# TEST_FILE=${TEST_FILE:-${cq_qwen_datasets}/exp_train_json/test_rl_datasets_hard_8437_middle_1563_math_no_prompt2_0806.parquet}
+
+# 学段遵从测试集
+# TEST_FILE=${TEST_FILE:-${edu_gy_zsg}/qwen35_rl/rl_data/stage_compliance/rl/merged_smoke_test_327_0824.parquet}
+
+# verl_grpo_geo3k
+PROJECT_NAME=${PROJECT_NAME:-verl_rose_steer_v1_datav8}
+
+# TRAIN_BATCH_SIZE 和 PPO_MINI_BATCH_SIZE设置成卡数
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-96}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-48}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-4096}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-5120}
+
 ACTOR_LR=${ACTOR_LR:-1e-6}
 PPO_EPOCHS=${PPO_EPOCHS:-1}
 CLIP_RATIO=${CLIP_RATIO:-0.2}
 GRAD_CLIP=${GRAD_CLIP:-1.0}
-TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
-SAVE_FREQ=${SAVE_FREQ:-6}
-VAL_FREQ=${VAL_FREQ:-6}
-
-ROLLOUT_TP=${ROLLOUT_TP:-2}
-ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.7}
-ROLLOUT_N=${ROLLOUT_N:-8}
-ROLLOUT_TEMPERATURE=${ROLLOUT_TEMPERATURE:-1.0}
-ROLLOUT_TOP_P=${ROLLOUT_TOP_P:-0.99}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-5120}
-MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-5120}
-ROSE_EPSILON=${ROSE_EPSILON:-0.5}
-ROSE_TOP_K=${ROSE_TOP_K:-20}
-ROSE_SEMANTIC_CHUNK_SIZE=${ROSE_SEMANTIC_CHUNK_SIZE:-256}
-MODEL_TAG=$(basename "${MODEL_PATH%/}")
-EMBEDDING_DIR=${EMBEDDING_DIR:-$BASE_PATH/rose_embeddings/$MODEL_TAG}
-EMBEDDING_PATH=${EMBEDDING_PATH:-$EMBEDDING_DIR/input_embeddings.f16}
-EMBEDDING_META_PATH=${EMBEDDING_META_PATH:-${EMBEDDING_PATH%.*}.json}
 
 STEER_TOKEN_WEIGHT_MIN=${STEER_TOKEN_WEIGHT_MIN:-0.7}
 STEER_TOKEN_WEIGHT_MAX=${STEER_TOKEN_WEIGHT_MAX:-1.0}
 STEER_LINEAR=${STEER_LINEAR:-false}
 STEER_ENTROPY_CONTROL_MODE=${STEER_ENTROPY_CONTROL_MODE:-symmetric}
 
-trainer_args=(
-    algorithm.adv_estimator=grpo
-    algorithm.rollout_correction.rollout_is=null
-    algorithm.rollout_correction.rollout_rs=null
-    algorithm.rollout_correction.bypass_mode=False
-    algorithm.use_kl_in_reward=False
-    algorithm.filter_groups.enable=True
-    algorithm.filter_groups.metric=reward
-    data.train_files="['${TRAIN_FILE}']"
-    data.val_files="['${VAL_EASY}', '${VAL_ABITHARD}', '${VAL_HARD}', '${VAL_VERYHARD}', '${TEST_EASY}', '${TEST_ABITHARD}', '${TEST_HARD}', '${TEST_VERYHARD}']"
-    data.image_key=images
-    data.prompt_key=prompt
-    data.reward_fn_key=data_source
-    data.return_raw_chat=True
-    data.train_batch_size="${TRAIN_BATCH_SIZE}"
-    data.max_prompt_length="${MAX_PROMPT_LENGTH}"
-    data.max_response_length="${MAX_RESPONSE_LENGTH}"
-    data.filter_overlong_prompts=True
-    data.truncation='error'
-    data.shuffle=True
-    ++data.apply_chat_template_kwargs.enable_thinking=False
-    ++actor_rollout_ref.rollout.engine_kwargs.chat_template_kwargs.enable_thinking=False
-    actor_rollout_ref.model.path="${MODEL_PATH}"
-    actor_rollout_ref.model.use_remove_padding=False
-    actor_rollout_ref.model.enable_gradient_checkpointing=True
-    actor_rollout_ref.actor.strategy=fsdp2
-    actor_rollout_ref.actor.use_torch_compile=False
-    actor_rollout_ref.actor.optim.lr="${ACTOR_LR}"
-    actor_rollout_ref.actor.clip_ratio="${CLIP_RATIO}"
-    actor_rollout_ref.actor.grad_clip="${GRAD_CLIP}"
-    actor_rollout_ref.actor.ppo_epochs="${PPO_EPOCHS}"
-    actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}"
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
-    actor_rollout_ref.actor.use_dynamic_bsz=False
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU}"
-    actor_rollout_ref.actor.use_kl_loss=True
-    actor_rollout_ref.actor.kl_loss_coef=0
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl
-    actor_rollout_ref.actor.entropy_coeff=0
-    actor_rollout_ref.actor.calculate_entropy=False
-    actor_rollout_ref.actor.entropy_from_logits_with_chunking=False
-    actor_rollout_ref.actor.policy_loss.loss_mode=entropy_control
-    actor_rollout_ref.actor.policy_loss.token_weight_min="${STEER_TOKEN_WEIGHT_MIN}"
-    actor_rollout_ref.actor.policy_loss.token_weight_max="${STEER_TOKEN_WEIGHT_MAX}"
-    actor_rollout_ref.actor.policy_loss.linear="${STEER_LINEAR}"
-    actor_rollout_ref.actor.policy_loss.entropy_control_mode="${STEER_ENTROPY_CONTROL_MODE}"
-    actor_rollout_ref.actor.loss_agg_mode=token-mean
-    actor_rollout_ref.actor.loss_scale_factor=null
-    actor_rollout_ref.actor.fsdp_config.param_offload=True
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
-    actor_rollout_ref.actor.fsdp_config.offload_policy=False
-    actor_rollout_ref.actor.fsdp_config.forward_prefetch=False
-    actor_rollout_ref.actor.fsdp_config.grad_sync_every_micro_batch=True
-    actor_rollout_ref.actor.checkpoint.save_contents="['model','optimizer','extra']"
-    actor_rollout_ref.ref.strategy=fsdp2
-    actor_rollout_ref.ref.fsdp_config.param_offload=True
-    actor_rollout_ref.ref.fsdp_config.forward_prefetch=False
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
-    actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.tensor_model_parallel_size="${ROLLOUT_TP}"
-    actor_rollout_ref.rollout.gpu_memory_utilization="${ROLLOUT_GPU_MEM_UTIL}"
-    actor_rollout_ref.rollout.n="${ROLLOUT_N}"
-    actor_rollout_ref.rollout.temperature="${ROLLOUT_TEMPERATURE}"
-    actor_rollout_ref.rollout.top_p="${ROLLOUT_TOP_P}"
-    actor_rollout_ref.rollout.val_kwargs.n=1
-    actor_rollout_ref.rollout.val_kwargs.do_sample=False
-    actor_rollout_ref.rollout.val_kwargs.temperature=0
-    actor_rollout_ref.rollout.val_kwargs.top_p=1.0
-    actor_rollout_ref.rollout.val_kwargs.top_k=-1
-    actor_rollout_ref.rollout.enforce_eager=False
-    actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU}"
-    actor_rollout_ref.rollout.enable_chunked_prefill=True
-    actor_rollout_ref.rollout.free_cache_engine=True
-    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096
-    reward.reward_model.enable=false
-    actor_rollout_ref.actor.clip_ratio_high=0.20
-    actor_rollout_ref.actor.clip_ratio_low=0.20
-    actor_rollout_ref.rollout.enable_prefix_caching=False
-    actor_rollout_ref.rollout.agent.num_workers=4
-    actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS"
-    actor_rollout_ref.rollout.calculate_log_probs=true
-    actor_rollout_ref.rollout.agent.default_agent_loop=single_turn_agent
-    actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl.experimental.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ
-    actor_rollout_ref.rollout.rose.enable=true
-    actor_rollout_ref.rollout.rose.num_trajectories="$ROLLOUT_N"
-    actor_rollout_ref.rollout.rose.epsilon="$ROSE_EPSILON"
-    actor_rollout_ref.rollout.rose.top_k="$ROSE_TOP_K"
-    actor_rollout_ref.rollout.rose.embedding_path="$EMBEDDING_PATH"
-    actor_rollout_ref.rollout.rose.embedding_meta_path="$EMBEDDING_META_PATH"
-    actor_rollout_ref.rollout.rose.semantic_device=cpu
-    actor_rollout_ref.rollout.rose.semantic_chunk_size="$ROSE_SEMANTIC_CHUNK_SIZE"
-    algorithm.norm_adv_by_std_in_grpo=true
-    algorithm.advantage_extra_fields='[]'
-    reward.reward_manager.name=naive
-    reward.num_workers="${REWARD_NUM_WORKERS}"
-    reward.custom_reward_function.path="${REWARD_FILE}"
-    trainer.use_v1=True
-    trainer.v1.trainer_mode=sync
-    trainer.balance_batch=True
-    trainer.logger='["console","tensorboard"]'
-    trainer.project_name="${PROJECT_NAME}"
-    trainer.experiment_name="$EXPERIMENT_NAME"
-    trainer.rollout_data_dir="${TRAIN_ROLLOUT_DIR}"
-    trainer.validation_data_dir="${VAL_ROLLOUT_DIR}"
-    trainer.n_gpus_per_node="${NTRAINER_GPUS_PER_NODE}"
-    trainer.nnodes="${TRAINER_NNODES}"
-    trainer.device=npu
-    trainer.default_local_dir="${DEFAULT_LOCAL_DIR}"
-    trainer.val_before_train=False
-    trainer.v1.sampler.sync_refill_failed_groups=True
-    trainer.save_freq="${SAVE_FREQ}"
-    trainer.test_freq="${VAL_FREQ}"
-    trainer.total_epochs="${TOTAL_EPOCHS}"
-)
+ROLLOUT_TP=${ROLLOUT_TP:-2} #
+ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.7} #
+ROLLOUT_N=${ROLLOUT_N:-8}
+ROLLOUT_TEMPERATURE=${ROLLOUT_TEMPERATURE:-1.0}
+ROLLOUT_TOP_P=${ROLLOUT_TOP_P:-0.99}
 
-if [[ ${1:-} == --print-config ]]; then
-    shift
-    exec "$PYTHON_BIN" -m verl.trainer.main_ppo --cfg job "${trainer_args[@]}" "$@"
-fi
+DEFAULT_LOCAL_DIR=${DEFAULT_LOCAL_DIR:-${SAVE_PATH}/saved_models/rl_ckpt/rose_steer_v1/${EXP_NAME}}
 
-if [[ -z "$BASE_PATH" || -z "$SAVE_PATH" ]]; then
-    echo "Set BASE_PATH and SAVE_PATH (or lhx_sh and lhx_save) before launching training." >&2
-    exit 1
-fi
+# ${cq_qwen_datasets}/saved_models/rl_ckpt
+LOG_PATH=${LOG_PATH:-${SAVE_PATH}/qwen35_rl/log/rose_steer_v1/${EXP_NAME}/}
+echo "LOG_PATH resolved to: ${LOG_PATH}"
 
-# Cluster environment from the ROSE datav8 launcher.
-PROXY_ADDR=${PROXY_ADDR-http://10.31.196.119:80}
-if [[ -n "$PROXY_ADDR" ]]; then
-    export no_proxy="${no_proxy:+$no_proxy,}10.44.***.***"
-    export http_proxy="$PROXY_ADDR" https_proxy="$PROXY_ADDR"
-    export HTTP_PROXY="$PROXY_ADDR" HTTPS_PROXY="$PROXY_ADDR"
-    export FTP_PROXY="$PROXY_ADDR" ftp_proxy="$PROXY_ADDR"
-fi
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
+SAVE_FREQ=${SAVE_FREQ:-6} #
+VAL_FREQ=${VAL_FREQ:-6} #
 
-source /home/ma-user/Ascend/cann-8.5.2/set_env.sh
-source /home/ma-user/Ascend/nnal/atb/set_env.sh
-export LD_PRELOAD="/home/ma-user/Ascend/cann-8.5.2/lib64/libprofapi.so${LD_PRELOAD:+:$LD_PRELOAD}"
-export LD_LIBRARY_PATH="/usr/local/lib:/root/miniconda3/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export NON_MEGATRON=true MULTI_STREAM_MEMORY_REUSE=2 TASK_QUEUE_ENABLE=1
-export ASCEND_LAUNCH_BLOCKING=0 ACLNN_CACHE_LIMIT=100000 CPU_AFFINITY_CONF=1
-unset PYTORCH_NPU_ALLOC_CONF
-export ACL_OP_COMPILER_CACHE_DIR
-export HCCL_EXEC_TIMEOUT=7200 HCCL_IF_BASE_PORT=64000 ACL_DEVICE_SYNC_TIMEOUT=7200
-export HCCL_CONNECT_TIMEOUT=7200 TORCH_DIST_TIMEOUT=3600 HCCL_OP_EXPANSION_MODE=AIV
-export HYDRA_FULL_ERROR=1 ASCEND_GLOBAL_LOG_LEVEL=3
-export RAY_DEDUP_LOGS=0 RAY_USAGE_STATS_ENABLED=0 RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-export RAY_gcs_server_rpc_server_thread_num=32 RAY_gcs_server_request_timeout_seconds=1200
-export RAY_timeout_ms=120000 RAY_worker_register_timeout_seconds=1200
-export RAY_HEARTBEAT_TIMEOUT_MS=60000 RAY_gcs_actor_failure_grace_period_ms=60000
-export VLLM_RPC_TIMEOUT=600000
+# MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-5120}
 
+### 启动分布式网络配置（多节点）
 NODE_RANK=${VC_TASK_INDEX:-0}
-WORKER_HOSTS=${VC_WORKER_HOSTS:-${MA_CURRENT_IP:?Set MA_CURRENT_IP to the local Ray node IP}}
-MASTER_ADDR=${MASTER_ADDR:-${WORKER_HOSTS%%,*}}
+MASTER_ADDR="${VC_WORKER_HOSTS%%,*}"
 MASTER_PORT=${MASTER_PORT:-6167}
 DASHBOARD_PORT=${DASHBOARD_PORT:-8191}
-SOCKET_IFNAME=${SOCKET_IFNAME:-eth0}
-export NODE_RANK MASTER_ADDR MASTER_PORT NPUS_PER_NODE
-export WORLD_SIZE=$((NNODES * NPUS_PER_NODE))
-export HCCL_SOCKET_IFNAME="$SOCKET_IFNAME" GLOO_SOCKET_IFNAME="$SOCKET_IFNAME" TP_SOCKET_IFNAME="$SOCKET_IFNAME"
-export TMPDIR=${TMPDIR_RAY:-/cache/ray_tmp}
-mkdir -p "$TMPDIR"
 
-"$PYTHON_BIN" -c 'import torch_npu; print(torch_npu.npu.is_available())'
-"$PYTHON_BIN" -m pip install 'accelerate>=1.6.0' aiohttp aiofiles math-verify \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple
+export NODE_RANK MASTER_ADDR MASTER_PORT
+export TMPDIR=/cache/ray_tmp
+mkdir -p /cache/ray_tmp
 
-prepare_embeddings() {
-    if "$PYTHON_BIN" - "$EMBEDDING_PATH" "$EMBEDDING_META_PATH" "$MODEL_PATH" <<'PY'
+export NPUS_PER_NODE=8
+export WORLD_SIZE=$(( NNODES * NPUS_PER_NODE ))
+
+readonly SOCKET_IFNAME="eth0"
+# # 确保使用正确的网卡名称
+# export GLOO_SOCKET_IFNAME=eth0
+# export TP_SOCKET_IFNAME=eth0
+# # 尝试强制 vLLM 使用特定的本地地址进行初始化
+# export VLLM_RPC_TORCH_DIST_BACKEND=gloo
+
+# pip install -U "ray"
+
+# pip install numpy av ftfy bs4 beartype pandas==2.0.3 diffusers==0.30.3 accelerate==0.32.1 pandarallel datasets qwen_vl_utils imageio imageio-ffmpeg jsonargparse peft==0.7.1 "pydantic>=2.10.4" gpytorch==1.14
+
+# pip install jsonnet==0.17.0
+# pip install torchdata rich
+# pip install tensordict
+
+# ================= Ray 资源清理与环境就绪 =================
+# echo "Cleaning up old Ray processes..."
+# ray stop --force || true
+# sleep 5
+# rm -rf /cache/ray_tmp/* || true
+# pkill -9 -f raylet || true
+# pkill -9 -f plasma_store || true
+# pkill -9 -f gcs_server || true
+# echo "Waiting 20s for NPU to release resources..."
+# sleep 20
+
+# pip install flash-linear-attention==0.5.0
+
+# cd ${PROJECT_ROOT}
+# pip install "datasets==4.3.0"
+# pip install numpy==1.26.4
+# pip install triton-ascend==3.2.0
+# pip install -U hydra-core
+
+# pip uninstall torch_c_dlpack_ext -y || true
+# pip install torch==2.9.0
+# pip install torch_npu==2.9.0
+
+# pip list
+
+export RAY_DEDUP_LOGS=0
+export HCCL_SOCKET_IFNAME=$SOCKET_IFNAME
+export GLOO_SOCKET_IFNAME=$SOCKET_IFNAME
+export TP_SOCKET_IFNAME=$SOCKET_IFNAME
+export ASCEND_GLOBAL_LOG_LEVEL=3
+export HYDRA_FULL_ERROR=1
+export RAY_gcs_server_rpc_server_thread_num=32
+export RAY_gcs_server_request_timeout_seconds=1200
+export RAY_timeout_ms=120000
+export RAY_worker_register_timeout_seconds=1200
+export RAY_USAGE_STATS_ENABLED=0
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+
+export VLLM_RPC_TIMEOUT=600000
+
+# transformers==5.3.0
+# pip install mathruler pylatexenc
+
+# 安装指定版本的transformer
+# pip install tokenizers==0.21.1
+# cd ${PROJECT_ROOT}/transformers
+# pip install -e .
+# cd ${PROJECT_ROOT}
+pip install aiohttp aiofiles math-verify -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip list
+
+export TENSORBOARD_DIR="${TENSORBOARD_DIR}"
+
+export RAY_HEARTBEAT_TIMEOUT_MS=60000
+export RAY_gcs_actor_failure_grace_period_ms=60000
+
+echo $RAY_gcs_rpc_server_reconnect_timeout_s
+
+# ================= 准备embedding =================
+MODEL_TAG=$(basename "${MODEL_PATH%/}")
+EMBEDDING_DIR=${EMBEDDING_DIR:-"${BASE_PATH}/rose_embeddings/${MODEL_TAG}"}
+EMBEDDING_PATH=${EMBEDDING_PATH:-"${EMBEDDING_DIR}/input_embeddings.f16"}
+EMBEDDING_META_PATH=${EMBEDDING_META_PATH:-"${EMBEDDING_DIR}/input_embeddings.json"}
+mkdir -p "$(dirname "$EMBEDDING_PATH")"
+
+# Prepare the normalized input-embedding mmap once.  The metadata check makes
+# changing MODEL_PATH safe: a stale table is regenerated automatically.
+prepare_embedding=0
+if [[ ! -s "$EMBEDDING_PATH" || ! -s "$EMBEDDING_META_PATH" ]]; then
+    prepare_embedding=1
+elif ! python3 - "$EMBEDDING_META_PATH" "$MODEL_PATH" <<'PY'
 import json
 import sys
-from pathlib import Path
 
-embedding, metadata = map(Path, sys.argv[1:3])
+metadata_path, model_path = sys.argv[1:]
 try:
-    info = json.loads(metadata.read_text(encoding="utf-8"))
-    assert info["normalized"] is True and info["dtype"] == "float16"
-    assert info["model_path"] == sys.argv[3]
-    assert embedding.stat().st_size == 2 * info["vocab_size"] * info["hidden_size"]
-except (OSError, ValueError, TypeError, KeyError, AssertionError):
-    raise SystemExit(1) from None
+    with open(metadata_path, encoding="utf-8") as stream:
+        metadata = json.load(stream)
+    valid = metadata.get("normalized") is True and metadata.get("model_path") == model_path
+except (OSError, ValueError, TypeError):
+    valid = False
+raise SystemExit(0 if valid else 1)
 PY
-    then
-        return
-    fi
+then
+    prepare_embedding=1
+fi
 
-    mkdir -p "$(dirname "$EMBEDDING_PATH")" "$(dirname "$EMBEDDING_META_PATH")"
-    (
-        tmp_dir=$(mktemp -d "$(dirname "$EMBEDDING_PATH")/.rose-steer-embeddings.XXXXXX")
-        trap 'rm -rf -- "$tmp_dir"' EXIT
-        "$PYTHON_BIN" -m verl.experimental.rose.prepare_embeddings \
-            --model-path "$MODEL_PATH" --output-path "$tmp_dir/embeddings.f16"
-        mv -f -- "$tmp_dir/embeddings.f16" "$EMBEDDING_PATH"
-        mv -f -- "$tmp_dir/embeddings.json" "$EMBEDDING_META_PATH"
-    )
-}
+if (( prepare_embedding )); then
+    python3 -m verl.experimental.rose.prepare_embeddings \
+        --model-path "$MODEL_PATH" \
+        --output-path "$EMBEDDING_PATH"
+fi
 
-ray_node_args=("--node-ip-address=$MA_CURRENT_IP" "--resources={\"NPU\": $NPUS_PER_NODE}")
-if [[ "$NODE_RANK" == 0 ]]; then
-    mkdir -p "$LOG_PATH" "$TENSORBOARD_DIR" "$TRAIN_ROLLOUT_DIR" "$VAL_ROLLOUT_DIR"
-    ray start --head "${ray_node_args[@]}" --port="$MASTER_PORT" \
-        --dashboard-host=0.0.0.0 --dashboard-port="$DASHBOARD_PORT"
+# ================= 多节点：启动 Ray 集群 =================
+if [ "${NODE_RANK}" = "0" ]; then
+    # ---- 头节点：启动 Ray Head ----
+    echo "Starting Ray HEAD node on ${MA_CURRENT_IP}..."
+    ray start --head \
+        --node-ip-address=${MA_CURRENT_IP} \
+        --port=${MASTER_PORT} \
+        --dashboard-host=0.0.0.0 \
+        --dashboard-port=${DASHBOARD_PORT} \
+        --resources='{"NPU": '${NPUS_PER_NODE}'}'
 
-    # All Ray nodes read the shared datav8 embedding files. The head prepares them once.
-    prepare_embeddings
     while true; do
-        ray_status=$(ray status 2>/dev/null || true)
-        npu_count=$(awk 'match($0, /\/[0-9]+(\.[0-9]+)?[[:space:]]+NPU/) { print int(substr($0, RSTART + 1)); exit }' \
-            <<< "$ray_status")
-        if (( ${npu_count:-0} >= NNODES * NPUS_PER_NODE )); then
+        ray_status_output=$(ray status)
+        npu_count=$(echo "$ray_status_output" | grep -oP '(?<=/)\d+\.\d+(?=\s*NPU)' | head -n 1)
+        npu_count_int=$(echo "$npu_count" | awk '{print int($1)}')
+        device_count=$((npu_count_int / NPUS_PER_NODE))
+
+        if [ "$device_count" -eq "$NNODES" ]; then
+            echo "Ray cluster ready: ${device_count} nodes"
+            ray status
+
+            mkdir -p ${LOG_PATH}
+
+            python3 -m verl.trainer.main_ppo \
+                algorithm.adv_estimator=grpo \
+                algorithm.rollout_correction.rollout_is=null \
+                algorithm.rollout_correction.rollout_rs=null \
+                algorithm.rollout_correction.bypass_mode=False \
+                algorithm.use_kl_in_reward=False \
+                algorithm.filter_groups.enable=True \
+                algorithm.filter_groups.metric=reward \
+                data.train_files="['${TRAIN_FILE}']" \
+                data.val_files="['${VAL_EASY}', '${VAL_ABITHARD}', '${VAL_HARD}', '${VAL_VERYHARD}', '${TEST_EASY}', '${TEST_ABITHARD}', '${TEST_HARD}', '${TEST_VERYHARD}']" \
+                data.image_key=images \
+                data.prompt_key=prompt \
+                data.reward_fn_key=data_source \
+                data.return_raw_chat=True \
+                data.train_batch_size=${TRAIN_BATCH_SIZE} \
+                data.max_prompt_length=${MAX_PROMPT_LENGTH} \
+                data.max_response_length=${MAX_RESPONSE_LENGTH} \
+                data.filter_overlong_prompts=True \
+                data.truncation='error' \
+                data.shuffle=True \
+                ++data.apply_chat_template_kwargs.enable_thinking=False \
+                ++actor_rollout_ref.rollout.engine_kwargs.chat_template_kwargs.enable_thinking=False \
+                actor_rollout_ref.model.path="${MODEL_PATH}" \
+                actor_rollout_ref.model.use_remove_padding=False \
+                actor_rollout_ref.model.enable_gradient_checkpointing=True \
+                actor_rollout_ref.actor.strategy=fsdp2 \
+                actor_rollout_ref.actor.use_torch_compile=False \
+                actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
+                actor_rollout_ref.actor.clip_ratio=${CLIP_RATIO} \
+                actor_rollout_ref.actor.grad_clip=${GRAD_CLIP} \
+                actor_rollout_ref.actor.ppo_epochs=${PPO_EPOCHS} \
+                actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
+                actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+                actor_rollout_ref.actor.use_dynamic_bsz=False \
+                actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
+                actor_rollout_ref.actor.use_kl_loss=True \
+                actor_rollout_ref.actor.kl_loss_coef=0 \
+                actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+                actor_rollout_ref.actor.entropy_coeff=0 \
+                actor_rollout_ref.actor.calculate_entropy=False \
+                actor_rollout_ref.actor.entropy_from_logits_with_chunking=False \
+                actor_rollout_ref.actor.policy_loss.loss_mode=entropy_control \
+                actor_rollout_ref.actor.policy_loss.token_weight_min=${STEER_TOKEN_WEIGHT_MIN} \
+                actor_rollout_ref.actor.policy_loss.token_weight_max=${STEER_TOKEN_WEIGHT_MAX} \
+                actor_rollout_ref.actor.policy_loss.linear=${STEER_LINEAR} \
+                actor_rollout_ref.actor.policy_loss.entropy_control_mode=${STEER_ENTROPY_CONTROL_MODE} \
+                actor_rollout_ref.actor.loss_agg_mode=token-mean \
+                actor_rollout_ref.actor.loss_scale_factor=null \
+                actor_rollout_ref.actor.fsdp_config.param_offload=True \
+                actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+                actor_rollout_ref.actor.fsdp_config.offload_policy=False \
+                actor_rollout_ref.actor.fsdp_config.forward_prefetch=False \
+                actor_rollout_ref.actor.fsdp_config.grad_sync_every_micro_batch=True \
+                actor_rollout_ref.actor.checkpoint.save_contents="['model','optimizer','extra']" \
+                actor_rollout_ref.ref.strategy=fsdp2 \
+                actor_rollout_ref.ref.fsdp_config.param_offload=True \
+                actor_rollout_ref.ref.fsdp_config.forward_prefetch=False \
+                actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
+                actor_rollout_ref.rollout.name=vllm \
+                actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
+                actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL} \
+                actor_rollout_ref.rollout.n=${ROLLOUT_N} \
+                actor_rollout_ref.rollout.temperature=${ROLLOUT_TEMPERATURE} \
+                actor_rollout_ref.rollout.top_p=${ROLLOUT_TOP_P} \
+                actor_rollout_ref.rollout.val_kwargs.n=1 \
+                actor_rollout_ref.rollout.val_kwargs.do_sample=False \
+                actor_rollout_ref.rollout.val_kwargs.temperature=0 \
+                actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
+                actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
+                actor_rollout_ref.rollout.enforce_eager=False \
+                actor_rollout_ref.rollout.max_model_len=${MAX_MODEL_LEN} \
+                actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
+                actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False \
+                actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
+                actor_rollout_ref.rollout.enable_chunked_prefill=True \
+                actor_rollout_ref.rollout.free_cache_engine=True \
+                actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
+                reward.reward_model.enable=false \
+                actor_rollout_ref.actor.clip_ratio_high=0.20 \
+                actor_rollout_ref.actor.clip_ratio_low=0.20 \
+                actor_rollout_ref.rollout.enable_prefix_caching=False \
+                actor_rollout_ref.rollout.agent.num_workers=4 \
+                actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS" \
+                actor_rollout_ref.rollout.calculate_log_probs=true \
+                actor_rollout_ref.rollout.agent.default_agent_loop=single_turn_agent \
+                actor_rollout_ref.rollout.agent.agent_loop_manager_class=verl.experimental.rose.rose_agent_loop_tq.RoseAgentLoopManagerTQ \
+                actor_rollout_ref.rollout.rose.enable=true \
+                actor_rollout_ref.rollout.rose.num_trajectories="$ROLLOUT_N" \
+                actor_rollout_ref.rollout.rose.epsilon="$ROSE_EPSILON" \
+                actor_rollout_ref.rollout.rose.top_k="$ROSE_TOP_K" \
+                actor_rollout_ref.rollout.rose.embedding_path="$EMBEDDING_PATH" \
+                actor_rollout_ref.rollout.rose.embedding_meta_path="$EMBEDDING_META_PATH" \
+                actor_rollout_ref.rollout.rose.semantic_device=cpu \
+                actor_rollout_ref.rollout.rose.semantic_chunk_size="$ROSE_SEMANTIC_CHUNK_SIZE" \
+                algorithm.norm_adv_by_std_in_grpo=true \
+                algorithm.advantage_extra_fields='[]' \
+                reward.reward_manager.name=naive \
+                reward.num_workers=${REWARD_NUM_WORKERS} \
+                reward.custom_reward_function.path="${REWARD_FILE}" \
+                trainer.use_v1=True \
+                trainer.v1.trainer_mode=sync \
+                trainer.balance_batch=True \
+                trainer.logger='["console","tensorboard"]' \
+                trainer.project_name=${PROJECT_NAME} \
+                trainer.experiment_name=${EXP_NAME} \
+                trainer.rollout_data_dir="${TRAIN_ROLLOUT_DIR}" \
+                trainer.validation_data_dir="${VAL_ROLLOUT_DIR}" \
+                trainer.n_gpus_per_node=${NTRAINER_GPUS_PER_NODE} \
+                trainer.nnodes=${TRAINER_NNODES} \
+                trainer.device=npu \
+                trainer.default_local_dir=${DEFAULT_LOCAL_DIR} \
+                trainer.val_before_train=False \
+                trainer.v1.sampler.sync_refill_failed_groups=True \
+                trainer.save_freq=${SAVE_FREQ} \
+                trainer.test_freq=${VAL_FREQ} \
+                trainer.total_epochs=${TOTAL_EPOCHS} 2>&1 | tee -a ${LOG_PATH}/${SAVELOG_FILE_NAME}
+                
+            python_exit_code=${PIPESTATUS[0]}
+            if [ "${python_exit_code}" -ne 0 ]; then
+                echo "Training failed with exit code ${python_exit_code}...."
+                sleep 3h
+                exit ${python_exit_code}
+            fi
             break
         fi
-        echo "Waiting for Ray NPUs. Current=${npu_count:-0}, expected=$((NNODES * NPUS_PER_NODE))"
+
+        echo "Waiting for Ray nodes. Current=${device_count}, expected=${NNODES}"
         sleep 10
     done
-
-    "$PYTHON_BIN" -m verl.trainer.main_ppo "${trainer_args[@]}" "$@" 2>&1 | tee -a "$LOG_PATH/$SAVELOG_FILE_NAME"
 else
-    ray start "${ray_node_args[@]}" --address="$MASTER_ADDR:$MASTER_PORT" --block
+    # # ---- 工作节点：注册到 Ray Head ----
+    # while true; do
+    #     sleep 5
+
+    #     # echo "Waiting for Ray Head (GCS) to be ready..."
+    #     # while ! nc -z ${MASTER_ADDR} ${MASTER_PORT}; do
+    #     #     sleep 30
+    #     # done
+
+
+    #     echo "Ray Head is up! Starting worker..."
+    #     ray start \
+    #         --node-ip-address=${MA_CURRENT_IP} \
+    #         --address=${MASTER_ADDR}:${MASTER_PORT} \
+    #         --resources='{"NPU": '${NPUS_PER_NODE}'}'
+
+    #     if ray status; then
+    #         echo "Worker connected to Ray cluster"
+    #         sleep 600
+    #         break
+    #     fi
+
+    #     echo "Failed to connect Ray head, retrying..."
+    #     sleep 10
+    # done
+
+    echo "Ray Head is up! Starting worker..."
+
+    ray start \
+    --node-ip-address=${MA_CURRENT_IP} \
+    --address=${MASTER_ADDR}:${MASTER_PORT} \
+    --resources='{"NPU": '${NPUS_PER_NODE}'}'
+
+    sleep infinity
 fi
