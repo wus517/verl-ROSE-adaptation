@@ -308,6 +308,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     update_lr_scheduler=batch_idx == total_num_iterations - 1,
                     disable_auto_offload=True,
                 )
+                if tu.get_non_tensor_data(mini_batch_td, "steer_legacy_normalization", default=False):
+                    # Old actor divided each local micro-batch loss by the
+                    # accumulation count (or weighted by sample count for dynamic bsz).
+                    tu.assign_non_tensor(mini_batch_td, steer_local_mini_batch_size=len(mini_batch_td))
                 # Name the mini-batch in the trace so each iteration of this otherwise identical
                 # loop is distinguishable when the whole step is recorded (continuous mode).
                 with torch.profiler.record_function(f"mini_batch{batch_idx}"):
@@ -711,6 +715,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update", scheduled=True)
     @_with_routing_replay_flag(enabled=True)
     def update_actor(self, data: TensorDict) -> TensorDict:
+        if self.config.actor.policy_loss.loss_mode == "entropy_control":
+            tu.assign_non_tensor(
+                data,
+                steer_legacy_normalization=True,
+                steer_response_length=self.config.rollout.response_length,
+                calculate_entropy=False,
+            )
         output = self.actor.train_mini_batch(data=data)
         return output.cpu() if output is not None else None
 

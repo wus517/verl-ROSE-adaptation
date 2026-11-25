@@ -79,6 +79,18 @@ policy_loss:
   # Must be set to a positive value when policy_loss.loss_mode is "dro".
   dro_beta: null
 
+  # STEER lower bound; matches the old actor fallback, overridden by old recipes.
+  token_weight_min: 0.95
+
+  # STEER upper bound (symmetric exponential mapping always has upper bound 1).
+  token_weight_max: 1.05
+
+  # STEER mapping: false for exponential, true for linear.
+  linear: true
+
+  # STEER controls the magnitude of entropy change by default.
+  entropy_control_mode: symmetric
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 

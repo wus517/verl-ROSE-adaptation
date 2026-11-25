@@ -131,9 +131,23 @@ log_part
 log
 outputs
 .history
+log_4096
 
 # .sh files
 run_rose_new.sh
+run_rose_4096.sh
+run_grpo_4096.sh
+run_rose_4096_nodynamic.sh
+run_rose_dynamic.sh
+run_rose_datav8.sh
+run_steer_datav8.sh
+
+#.md files
+ROSE_PERFORMANCE_AUDIT.md
+ROSE_CODE_CHANGES.md
+ROSE_IMPLEMENTATION_DECISIONS.md
+ROSE_VERL_ASCEND_ADAPTATION.md
+ROSE_VERL_TUTORIAL.md
 
 # other files
 TreePO

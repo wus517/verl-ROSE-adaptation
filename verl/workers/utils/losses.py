@@ -16,13 +16,30 @@
 import torch
 from tensordict import TensorDict
 
-from verl.trainer.ppo.core_algos import agg_loss, compute_value_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import (
+    agg_loss,
+    agg_steer_loss,
+    compute_value_loss,
+    get_policy_loss_fn,
+    kl_penalty,
+    kl_penalty_forward,
+)
 from verl.utils import tensordict_utils as tu
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.metric import AggregationType, Metric
 from verl.utils.torch_functional import masked_mean, masked_sum
 from verl.workers.config import ActorConfig, CriticConfig
 from verl.workers.utils.padding import no_padding_2_padding
+
+
+def _steer_accumulation_scale(config, data):
+    """Match old update_policy scaling using the actual rank-local mini-batch."""
+    local_size = tu.get_non_tensor_data(data, "steer_local_mini_batch_size", default=None)
+    if local_size is None:
+        raise ValueError("STEER requires steer_local_mini_batch_size from the training worker.")
+    if config.use_dynamic_bsz:
+        return len(data) / local_size
+    return 1.0 / (local_size // config.ppo_micro_batch_size_per_gpu)
 
 
 def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
@@ -57,7 +74,8 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
-    entropy = model_output.get("entropy", None)
+    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
+    entropy = model_output.get("entropy", None) if loss_mode != "entropy_control" else None
     if entropy is not None:
         entropy = no_padding_2_padding(entropy, data)
 
@@ -83,12 +101,33 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     metrics = {}
 
     # select fields and convert to padded tensor
+    steer_scale = _steer_accumulation_scale(config, data) if loss_mode == "entropy_control" else 1.0
+    steer_response_length = tu.get_non_tensor_data(data, "steer_response_length", default=log_prob.shape[-1])
     fields = ["response_mask", "old_log_probs", "advantages"]
+    entropy_key = None
+    if loss_mode == "entropy_control":
+        # V1 stores response-only nested entropy; V0 uses padded "entropys".
+        entropy_key = "entropy" if "entropy" in data else "entropys"
+        if entropy_key not in data:
+            raise ValueError("STEER requires cached old-policy entropy in the training batch.")
+        fields.append(entropy_key)
     if "rollout_is_weights" in data:
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
     data = data.select(*fields).to_padded_tensor()
+    if loss_mode == "entropy_control":
+        # Old tensors kept the configured response horizon, including padding.
+        # This matters for seq-mean-token-sum-norm's explicit width divisor.
+        def restore_horizon(tensor):
+            if tensor.shape[-1] > steer_response_length:
+                raise ValueError("STEER response tensor exceeds the configured response length.")
+            return torch.nn.functional.pad(tensor, (0, steer_response_length - tensor.shape[-1]))
+
+        log_prob = restore_horizon(log_prob)
+        data = TensorDict({key: restore_horizon(value) for key, value in data.items()}, batch_size=data.batch_size)
+        entropy = data[entropy_key].detach()
+        metric_aggregation = AggregationType.SUM
 
     response_mask = data["response_mask"].to(bool)
     # compute policy loss
@@ -98,9 +137,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     loss_agg_mode = config.loss_agg_mode
 
-    loss_mode = config.policy_loss.get("loss_mode", "vanilla")
-
     policy_loss_fn = get_policy_loss_fn(loss_mode)
+    loss_kwargs = {"entropys": data[entropy_key]} if entropy_key is not None else {}
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,
@@ -109,39 +147,57 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         loss_agg_mode=loss_agg_mode,
         config=config,
         rollout_is_weights=rollout_is_weights,
+        **loss_kwargs,
     )
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
     # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower
     pg_metrics = Metric.from_dict(pg_metrics, aggregation=AggregationType.MEAN)
+    if loss_mode == "entropy_control":
+        for key, aggregation in (
+            ("actor/token_weights_min", AggregationType.MIN),
+            ("actor/token_weights_max", AggregationType.MAX),
+        ):
+            if key in pg_metrics:
+                pg_metrics[key].aggregation = aggregation
 
     metrics.update(pg_metrics)
-    metrics["actor/pg_loss"] = Metric(value=pg_loss, aggregation=metric_aggregation)
+    metrics["actor/pg_loss"] = Metric(value=pg_loss * steer_scale, aggregation=metric_aggregation)
     policy_loss = pg_loss
 
     # add entropy loss
-    if entropy is not None:
-        entropy_loss = agg_loss(
-            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+    if entropy is not None and (loss_mode != "entropy_control" or config.entropy_coeff != 0):
+        entropy_loss = (
+            agg_steer_loss(entropy, response_mask, loss_agg_mode)
+            if loss_mode == "entropy_control"
+            else agg_loss(
+                loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+            )
         )
         entropy_coeff = config.entropy_coeff
         policy_loss -= entropy_coeff * entropy_loss
-        metrics["actor/entropy_loss"] = Metric(value=entropy_loss, aggregation=metric_aggregation)
+        metrics["actor/entropy_loss"] = Metric(value=entropy_loss * steer_scale, aggregation=metric_aggregation)
 
     # add kl loss
     if config.use_kl_loss:
         ref_log_prob = data["ref_log_prob"]
         # compute kl loss
-        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
-        kl_loss = agg_loss(
-            loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+        # The old KL had no '+' straight-through gradient variants.
+        kl_fn = kl_penalty_forward if loss_mode == "entropy_control" else kl_penalty
+        kld = kl_fn(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=config.kl_loss_type)
+        kl_loss = (
+            agg_steer_loss(kld, response_mask, loss_agg_mode)
+            if loss_mode == "entropy_control"
+            else agg_loss(
+                loss_mat=kld, loss_mask=response_mask, loss_agg_mode=config.loss_agg_mode, **config.global_batch_info
+            )
         )
 
         policy_loss += kl_loss * config.kl_loss_coef
-        metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
+        metrics["kl_loss"] = Metric(value=kl_loss * steer_scale, aggregation=metric_aggregation)
         metrics["kl_coef"] = config.kl_loss_coef
 
-    return policy_loss, metrics
+    return policy_loss * steer_scale, metrics
 
 
 def value_loss(config: CriticConfig, model_output, data: TensorDict, dp_group=None):
