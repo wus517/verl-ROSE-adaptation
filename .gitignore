@@ -141,6 +141,7 @@ run_rose_4096_nodynamic.sh
 run_rose_dynamic.sh
 run_rose_datav8.sh
 run_steer_datav8.sh
+some_sh
 
 #.md files
 ROSE_PERFORMANCE_AUDIT.md

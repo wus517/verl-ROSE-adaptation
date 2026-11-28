@@ -94,6 +94,17 @@ class PolicyLossConfig(BaseConfig):
         token_weight_max (float): STEER upper bound; symmetric exponential always uses 1.
         linear (bool): Use the released linear mapping instead of exponential mapping.
         entropy_control_mode (str): STEER symmetric magnitude or asymmetric signed proxy.
+        steer_quadrant_logging (bool): Log STEER quadrant statistics.
+        q2_high_entropy_ratio (float): Fraction of valid response tokens used to set the Q2 release cutoff.
+        q2_high_entropy_boost_strength (float): Maximum extra weight for selected Q2 tokens. Zero uses unit weights.
+        steer_recovery_quadrants (list[int]): Quadrants eligible for STEER recovery or entropy weighting.
+        steer_recovery_top_ratio (float): Fraction of valid response tokens used to set the recovery entropy cutoff.
+        steer_recovery_min_entropy (float): Exclusive lower entropy bound for recovery.
+        steer_recovery_rate (float): Fraction of the STEER weight reduction to restore.
+        steer_entropy_weighting (bool): Enable V8 low/high entropy weight mapping.
+        steer_low_entropy_weight_min (float): Mapping floor shared by enabled low entropy groups.
+        steer_high_entropy_weight_min_by_quadrant (list[float]): High entropy mapping floors in Q1–Q4 order.
+        steer_recovery_rate_by_quadrant (list[float]): High entropy recovery rates in Q1–Q4 order.
     """
 
     loss_mode: str = "vanilla"
@@ -108,9 +119,95 @@ class PolicyLossConfig(BaseConfig):
     token_weight_max: float = 1.05
     linear: bool = True
     entropy_control_mode: str = "symmetric"
+    steer_quadrant_logging: bool = False
+    q2_high_entropy_ratio: float = 0.0
+    q2_high_entropy_boost_strength: float = 0.0
+    steer_recovery_quadrants: list[int] = field(default_factory=list)
+    steer_recovery_top_ratio: float = 0.20
+    steer_recovery_min_entropy: float = 0.5
+    steer_recovery_rate: float = 0.25
+    steer_entropy_weighting: bool = False
+    steer_low_entropy_weight_min: float = 0.50
+    steer_high_entropy_weight_min_by_quadrant: list[float] = field(default_factory=lambda: [0.70] * 4)
+    steer_recovery_rate_by_quadrant: list[float] = field(default_factory=lambda: [0.35] * 4)
 
     def __post_init__(self):
+        if not isinstance(self.steer_quadrant_logging, bool):
+            raise ValueError("STEER steer_quadrant_logging must be a boolean.")
+        ratio = self.q2_high_entropy_ratio
+        if isinstance(ratio, bool) or not isinstance(ratio, int | float) or not 0.0 <= ratio <= 1.0:
+            raise ValueError("STEER q2_high_entropy_ratio must be a finite number in [0, 1].")
+        strength = self.q2_high_entropy_boost_strength
+        if (
+            isinstance(strength, bool)
+            or not isinstance(strength, int | float)
+            or not math.isfinite(strength)
+            or (strength != 0.0 and strength < 0.001)
+        ):
+            raise ValueError("STEER q2_high_entropy_boost_strength must be zero or a finite number >= 0.001.")
+        if ratio > 0.0 and (
+            self.loss_mode != "entropy_control" or self.entropy_control_mode != "symmetric" or self.linear
+        ):
+            raise ValueError(
+                "STEER q2_high_entropy_ratio > 0 requires entropy_control with symmetric exponential weights."
+            )
+        quadrants = self.steer_recovery_quadrants
+        if (
+            not isinstance(quadrants, list)
+            or any(type(quadrant) is not int or not 1 <= quadrant <= 4 for quadrant in quadrants)
+            or len(set(quadrants)) != len(quadrants)
+        ):
+            raise ValueError("STEER steer_recovery_quadrants must be a list of distinct integers in [1, 4].")
+        top_ratio = self.steer_recovery_top_ratio
+        if isinstance(top_ratio, bool) or not isinstance(top_ratio, int | float) or not 0.0 < top_ratio <= 1.0:
+            raise ValueError("STEER steer_recovery_top_ratio must be a finite number in (0, 1].")
+        min_entropy = self.steer_recovery_min_entropy
+        if (
+            isinstance(min_entropy, bool)
+            or not isinstance(min_entropy, int | float)
+            or not 0.0 <= min_entropy < math.inf
+        ):
+            raise ValueError("STEER steer_recovery_min_entropy must be a finite non-negative number.")
+        recovery_rate = self.steer_recovery_rate
+        if (
+            isinstance(recovery_rate, bool)
+            or not isinstance(recovery_rate, int | float)
+            or not 0.0 <= recovery_rate <= 1.0
+        ):
+            raise ValueError("STEER steer_recovery_rate must be a finite number in [0, 1].")
+        if not isinstance(self.steer_entropy_weighting, bool):
+            raise ValueError("STEER steer_entropy_weighting must be a boolean.")
+        low_floor = self.steer_low_entropy_weight_min
+        if isinstance(low_floor, bool) or not isinstance(low_floor, int | float) or not 0.0 < low_floor <= 1.0:
+            raise ValueError("STEER steer_low_entropy_weight_min must be a finite number in (0, 1].")
+        high_floors = self.steer_high_entropy_weight_min_by_quadrant
+        if (
+            not isinstance(high_floors, list)
+            or len(high_floors) != 4
+            or any(
+                isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 < value <= 1.0
+                for value in high_floors
+            )
+        ):
+            raise ValueError("STEER steer_high_entropy_weight_min_by_quadrant requires four finite values in (0, 1].")
+        recovery_rates = self.steer_recovery_rate_by_quadrant
+        if (
+            not isinstance(recovery_rates, list)
+            or len(recovery_rates) != 4
+            or any(
+                isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 <= value <= 1.0
+                for value in recovery_rates
+            )
+        ):
+            raise ValueError("STEER steer_recovery_rate_by_quadrant requires four finite values in [0, 1].")
+        if quadrants:
+            if self.loss_mode != "entropy_control" or self.entropy_control_mode != "symmetric" or self.linear:
+                raise ValueError("STEER recovery requires entropy_control with symmetric exponential weights.")
+            if ratio > 0.0:
+                raise ValueError("STEER recovery and q2_high_entropy_ratio > 0 cannot be enabled together.")
         if self.loss_mode != "entropy_control":
+            if self.steer_quadrant_logging:
+                raise ValueError("STEER quadrant logging requires loss_mode=entropy_control.")
             return
         if not math.isfinite(self.token_weight_min) or not 0 < self.token_weight_min <= 1:
             raise ValueError("STEER token_weight_min must be in (0, 1].")
@@ -118,6 +215,8 @@ class PolicyLossConfig(BaseConfig):
             raise ValueError("STEER token_weight_max must be finite and >= token_weight_min.")
         if self.entropy_control_mode not in ("symmetric", "asymmetric"):
             raise ValueError("STEER entropy_control_mode must be symmetric or asymmetric.")
+        if self.steer_quadrant_logging and (self.entropy_control_mode != "symmetric" or self.linear):
+            raise ValueError("STEER quadrant logging requires symmetric exponential weighting (linear=false).")
 
 
 @dataclass

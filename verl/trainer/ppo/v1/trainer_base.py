@@ -1905,6 +1905,10 @@ class PPOTrainer(ABC):
 
         output: TensorDict = self.actor_rollout_wg.update_actor(batch)
         output = rename_dict(output["metrics"], "actor/")
+        output = {
+            key.removeprefix("actor/") if key.startswith("actor/steer/") else key: value
+            for key, value in output.items()
+        }
         output["perf/mfu/actor"] = output.pop("actor/mfu")
         actor_metrics = reduce_metrics(output)
         metrics.update(actor_metrics)

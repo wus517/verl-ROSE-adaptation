@@ -95,6 +95,25 @@ actor_rollout_ref:
       token_weight_max: 1.05
       linear: true
       entropy_control_mode: symmetric
+      steer_quadrant_logging: false
+      q2_high_entropy_ratio: 0.0
+      q2_high_entropy_boost_strength: 0.0
+      steer_recovery_quadrants: []
+      steer_recovery_top_ratio: 0.2
+      steer_recovery_min_entropy: 0.5
+      steer_recovery_rate: 0.25
+      steer_entropy_weighting: false
+      steer_low_entropy_weight_min: 0.5
+      steer_high_entropy_weight_min_by_quadrant:
+      - 0.7
+      - 0.7
+      - 0.7
+      - 0.7
+      steer_recovery_rate_by_quadrant:
+      - 0.35
+      - 0.35
+      - 0.35
+      - 0.35
     clip_ratio_c: 3.0
     loss_agg_mode: token-mean
     loss_scale_factor: null

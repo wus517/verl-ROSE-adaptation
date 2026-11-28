@@ -474,6 +474,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor: TrainingWorker | None = None
         self.ref: TrainingWorker | None = None
         self.rollout: BaseRollout = None
+        self.steer_metrics = None
         assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref"]
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
@@ -644,7 +645,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     distillation_ppo_loss, config=actor_config, distillation_config=distillation_config
                 )
             else:
-                self.loss_fn = partial(ppo_loss, config=actor_config)
+                loss_kwargs = {"config": actor_config}
+                if actor_config.policy_loss.steer_quadrant_logging:
+                    from verl.trainer.ppo.steer_metrics import SteerV4Metrics
+
+                    self.steer_metrics = SteerV4Metrics()
+                    loss_kwargs["steer_metrics"] = self.steer_metrics
+                self.loss_fn = partial(ppo_loss, **loss_kwargs)
             self.actor = self.actor_worker_cls(config=actor_training_config)
             self.actor.reset()
             self.actor.set_loss_fn(self.loss_fn)
@@ -723,6 +730,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 calculate_entropy=False,
             )
         output = self.actor.train_mini_batch(data=data)
+        if self.steer_metrics is not None:
+            steer_metrics = self.steer_metrics.flush(dp_group=self.actor.engine.get_data_parallel_group())
+            if output is not None:
+                tu.get(output, "metrics").update(steer_metrics)
         return output.cpu() if output is not None else None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

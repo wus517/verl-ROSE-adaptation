@@ -71,7 +71,7 @@ def sft_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     return loss, {}
 
 
-def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None):
+def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None, steer_metrics=None):
     """Computes ppo loss from model output (log_prob, entropy, values, etc. ) and old_log_probs from data."""
     log_prob = no_padding_2_padding(model_output["log_probs"], data)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
@@ -139,6 +139,8 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
     loss_kwargs = {"entropys": data[entropy_key]} if entropy_key is not None else {}
+    if steer_metrics is not None:
+        loss_kwargs.update(steer_metrics=steer_metrics)
     pg_loss, pg_metrics = policy_loss_fn(
         old_log_prob=old_log_prob,
         log_prob=log_prob,

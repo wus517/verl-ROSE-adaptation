@@ -91,6 +91,37 @@ policy_loss:
   # STEER controls the magnitude of entropy change by default.
   entropy_control_mode: symmetric
 
+  # Add STEER quadrant metrics to the existing training metrics.
+  steer_quadrant_logging: false
+
+  # Restore unit weights for this fraction of the highest-entropy Q2 tokens. Zero disables V5 release.
+  q2_high_entropy_ratio: 0.0
+
+  # Maximum extra weight for selected Q2 tokens. Zero uses V5 unit weights.
+  q2_high_entropy_boost_strength: 0.0
+
+  # Quadrants eligible for V7 recovery. An empty list disables recovery.
+  steer_recovery_quadrants: []
+
+  # Fraction of valid response tokens used to set the recovery entropy cutoff.
+  steer_recovery_top_ratio: 0.20
+
+  # Exclusive lower entropy bound for recovery.
+  steer_recovery_min_entropy: 0.5
+
+  # Fraction of the STEER weight reduction to restore.
+  steer_recovery_rate: 0.25
+
+  # Enable V8 low/high entropy weight mapping for the recovery quadrants.
+  steer_entropy_weighting: false
+
+  # Mapping floor shared by the low entropy groups.
+  steer_low_entropy_weight_min: 0.50
+
+  # High entropy mapping floors and recovery rates in Q1–Q4 order.
+  steer_high_entropy_weight_min_by_quadrant: [0.70, 0.70, 0.70, 0.70]
+  steer_recovery_rate_by_quadrant: [0.35, 0.35, 0.35, 0.35]
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 
