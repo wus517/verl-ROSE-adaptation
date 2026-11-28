@@ -905,6 +905,7 @@ algorithm:
     length_calibration_alpha: 1.0
     require_binary_reward: true
     binary_reward_tolerance: 1.0e-06
+    use_unshaped_reward_for_correctness: false
   filter_groups:
     _target_: verl.trainer.config.FilterGroupsConfig
     enable: false

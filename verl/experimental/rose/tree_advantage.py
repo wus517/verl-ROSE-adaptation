@@ -1,3 +1,4 @@
+import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -151,9 +152,14 @@ def compute_rose_tree_advantage(
     index: np.ndarray,
     rose_tree_metadata: Sequence[Mapping[str, Any]],
     config: Any = None,
+    reward_extra_info: Sequence[Mapping[str, Any]] | None = None,
     **_: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute ROSE segment advantages from finalized rollout trees."""
+    """Compute ROSE segment advantages from finalized rollout trees.
+
+    Shaped terminal rewards drive node values. When configured, use DAPO's
+    unshaped reward to identify correct responses for length calibration.
+    """
     if token_level_rewards.shape != response_mask.shape:
         raise ValueError(
             f"token_level_rewards shape {token_level_rewards.shape} does not match response_mask {response_mask.shape}"
@@ -169,6 +175,10 @@ def compute_rose_tree_advantage(
 
     require_binary_reward = bool(_config_value(config, "require_binary_reward", True))
     binary_tolerance = float(_config_value(config, "binary_reward_tolerance", 1e-6))
+    use_unshaped_reward = _config_value(config, "use_unshaped_reward_for_correctness", False)
+    if use_unshaped_reward and (reward_extra_info is None or len(reward_extra_info) != len(index)):
+        raise ValueError("ROSE requires reward_extra_info for each response when using unshaped rewards")
+    correct_responses: set[int] = set()
 
     for row in range(token_level_rewards.shape[0]):
         response_length = int(response_lengths[row].item())
@@ -181,8 +191,22 @@ def compute_rose_tree_advantage(
         if tree_id != str(index[row]):
             raise ValueError(f"ROSE tree_id {tree_id!r} does not match uid {index[row]!r} at row {row}")
         reward = float(leaf_rewards[row].item())
-        if require_binary_reward and min(abs(reward), abs(reward - 1.0)) > binary_tolerance:
-            raise ValueError(f"ROSE requires binary rewards, got {reward} at row {row}")
+        correctness_reward = reward
+        if use_unshaped_reward:
+            if not math.isfinite(reward):
+                raise ValueError(f"ROSE requires a finite terminal reward, got {reward} at row {row}")
+            info = reward_extra_info[row]
+            if not isinstance(info, Mapping) or ("score" not in info and "acc" not in info):
+                raise ValueError(f"ROSE requires an unshaped score or acc in reward_extra_info at row {row}")
+            # DAPO preserves dict scores and puts scalar scores in acc.
+            correctness_reward = float(info.get("score", info.get("acc")))
+        if require_binary_reward and (
+            not math.isfinite(correctness_reward)
+            or min(abs(correctness_reward), abs(correctness_reward - 1.0)) > binary_tolerance
+        ):
+            raise ValueError(f"ROSE requires binary rewards for correctness, got {correctness_reward} at row {row}")
+        if abs(correctness_reward - 1.0) <= binary_tolerance:
+            correct_responses.add(row)
         parsed_paths[row] = _validate_metadata(metadata, response_length)
         groups[tree_id].append(row)
 
@@ -219,7 +243,7 @@ def compute_rose_tree_advantage(
                     segment_advantage = node_values[node_ids[node_index]] - node_values[node_ids[node_index - 1]]
                     advantages[row, start:stop] = segment_advantage
 
-            correct_rows = [row for row in rows if abs(float(leaf_rewards[row].item()) - 1.0) <= binary_tolerance]
+            correct_rows = [row for row in rows if row in correct_responses]
             if len(correct_rows) < 2 or alpha == 0:
                 continue
             shortest_row = min(

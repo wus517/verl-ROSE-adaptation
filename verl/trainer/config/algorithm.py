@@ -65,6 +65,7 @@ class RoseAlgorithmConfig(BaseConfig):
     length_calibration_alpha: float = 1.0
     require_binary_reward: bool = True
     binary_reward_tolerance: float = 1e-6
+    use_unshaped_reward_for_correctness: bool = False
 
     def __post_init__(self) -> None:
         if self.length_calibration_alpha < 0:

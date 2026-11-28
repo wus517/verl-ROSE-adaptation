@@ -88,6 +88,8 @@ algorithm:
     length_calibration_alpha: 1.0
     require_binary_reward: true
     binary_reward_tolerance: 1.0e-6
+    # Read the pre-penalty score from reward_extra_info for length calibration.
+    use_unshaped_reward_for_correctness: false
 
   # Group filtering configuration used by DAPO and entropy-based sampling
   filter_groups:
